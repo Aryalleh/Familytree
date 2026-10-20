@@ -935,23 +935,8 @@ function addRelative(p, kind) {
   const name = fullName(p);
   switch (kind) {
     case "father":
-    case "mother": {
-      const male = kind === "father";
-      return openPersonForm({
-        title: `افزودن ${male ? "پدر" : "مادر"} برای ${esc(name)}`,
-        preset: { gender: male ? "male" : "female", last_name: male ? p.last_name : "" },
-        lockGender: true,
-        after: async (np) => {
-          await api("PUT", `/api/people/${p.id}`, { [male ? "father_id" : "mother_id"]: np.id });
-          // link the two parents as a couple if both are now known
-          const other = male ? p.mother_id : p.father_id;
-          if (other) {
-            const [h, w] = male ? [np.id, other] : [other, np.id];
-            await api("POST", "/api/marriages", { husband_id: h, wife_id: w }).catch(() => {});
-          }
-        },
-      });
-    }
+    case "mother":
+      return openParentForm(p, kind === "father");
     case "son":
     case "daughter": {
       const spouses = S.fam.spousesOf(p.id);
@@ -969,6 +954,73 @@ function addRelative(p, kind) {
       });
     case "spouse":
       return openSpouseForm(p);
+  }
+}
+
+/** Add a father or mother: pick someone already in the tree, or create a new person. */
+function openParentForm(p, male) {
+  const word = male ? "پدر" : "مادر";
+  const key = male ? "father_id" : "mother_id";
+  const otherParent = male ? p.mother_id : p.father_id;
+  // a parent can't be the person themself or one of their descendants
+  const allowed = (x) => x.gender === (male ? "male" : "female") && x.id !== p.id && !S.fam.ancestors(x.id).has(p.id);
+  // suggest the known parent's spouse (e.g. the father's wife when adding a mother)
+  const suggested = otherParent ? S.fam.spousesOf(otherParent).map((s) => s.id).find((id) => allowed(person(id))) ?? null : null;
+  const link = async (parentId) => {
+    await api("PUT", `/api/people/${p.id}`, { [key]: parentId });
+    // link the two parents as a couple if both are now known
+    if (otherParent) {
+      const [h, w] = male ? [parentId, otherParent] : [otherParent, parentId];
+      await api("POST", "/api/marriages", { husband_id: h, wife_id: w }).catch(() => {});
+    }
+  };
+  const candidates = S.people.filter(allowed);
+  if (!candidates.length) return openNewParent();
+
+  const { el, close } = modal({
+    title: `افزودن ${word} برای ${esc(fullName(p))}`,
+    body: `<div class="tabs"><button class="active" data-tab="existing">از افراد موجود</button><button data-tab="new">شخص تازه</button></div>
+      <div data-pane="existing">
+        <label class="field"><span>${word}</span><select class="input" name="parent">${personOptions(allowed, suggested, { none: "— انتخاب کنید —" })}</select></label>
+        ${suggested ? `<p class="hint">پیشنهاد: همسرِ ${esc(fullName(person(otherParent)))}</p>` : ""}
+      </div>
+      <div data-pane="new" hidden><p class="hint">پس از زدن «ادامه»، فرم شخص تازه باز می‌شود.</p></div>
+      <div class="error"></div>`,
+    foot: `<button class="btn" data-cancel>انصراف</button><button class="btn primary" data-save>ادامه</button>`,
+  });
+  let tab = "existing";
+  $$("[data-tab]", el).forEach((b) =>
+    b.addEventListener("click", () => {
+      tab = b.dataset.tab;
+      $$("[data-tab]", el).forEach((x) => x.classList.toggle("active", x === b));
+      $$("[data-pane]", el).forEach((x) => (x.hidden = x.dataset.pane !== tab));
+    }),
+  );
+  $("[data-cancel]", el).addEventListener("click", close);
+  $("[data-save]", el).addEventListener("click", async () => {
+    if (tab === "new") {
+      close();
+      return openNewParent();
+    }
+    const id = Number($("[name=parent]", el).value);
+    if (!id) return ($(".error", el).textContent = "یک نفر را انتخاب کنید");
+    try {
+      await link(id);
+      close();
+      toast(`${fullName(person(id))} به‌عنوان ${word} ثبت شد`);
+      await loadTree();
+    } catch (e) {
+      $(".error", el).textContent = e.message;
+    }
+  });
+
+  function openNewParent() {
+    openPersonForm({
+      title: `افزودن ${word} برای ${esc(fullName(p))}`,
+      preset: { gender: male ? "male" : "female", last_name: male ? p.last_name : "" },
+      lockGender: true,
+      after: (np) => link(np.id),
+    });
   }
 }
 
