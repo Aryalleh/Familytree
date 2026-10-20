@@ -249,9 +249,11 @@ function renderMain() {
   $("[data-act=users]")?.addEventListener("click", () => openAdmin());
   $("[data-act=account]").addEventListener("click", () => openAccount());
   $("[data-act=print]").addEventListener("click", () => {
-    S.tree.fit(false);
-    setTimeout(() => window.print(), 60);
+    enterPrint();
+    window.print();
   });
+  window.addEventListener("beforeprint", enterPrint);
+  window.addEventListener("afterprint", exitPrint);
   $("[data-act=logout]").addEventListener("click", async () => {
     await api("POST", "/api/logout", {}).catch(() => {});
     S.user = null;
@@ -399,13 +401,29 @@ function redraw(relayout = false) {
   } else empty.hidden = true;
 
   const kin = new Set(S.selectedId != null && person(S.selectedId) ? familyIds(S.selectedId).slice(1) : []);
-  S.tree.render(
-    shownFamily(),
-    S.fam,
-    { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo },
-    { relayout },
-  );
+  const state = S.printing
+    ? { focusId: S.focusId, relationsTo }
+    : { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo };
+  S.tree.render(shownFamily(), S.fam, state, { relayout: relayout || S.printing, duplicates: S.printing });
+  if (S.printing) S.tree.setPrintView(true);
   renderLegend();
+}
+
+/**
+ * Print version: people who married into another branch are drawn a second time under
+ * their own parents (with a matching numbered marker) instead of long crossing lines.
+ */
+function enterPrint() {
+  if (S.printing || !S.tree) return;
+  S.printing = true;
+  redraw(true);
+}
+
+function exitPrint() {
+  if (!S.printing) return;
+  S.printing = false;
+  S.tree.setPrintView(false);
+  redraw(true);
 }
 
 function renderLegend() {
@@ -413,7 +431,7 @@ function renderLegend() {
   const collapsed = store.get("ft_legend") === "0";
   const focus = person(S.focusId);
   const kinds = ["self", "spouse", "parent", "child", "sibling", "blood", "inlaw", "step"];
-  lg.hidden = collapsed;
+  lg.hidden = collapsed && !S.printing;
   lg.innerHTML = `
     <div class="legend-row">
       <b>راهنمای نمادها:</b>
@@ -421,15 +439,15 @@ function renderLegend() {
       <span><i class="sw female"></i>زن</span>
       <span><i class="sw rings-sw">⚭</i>ازدواج</span>
       <span><i class="sw line"></i>فرزند</span>
-      <span><i class="sw cons"></i>ازدواج فامیلی</span>
-      <span><i class="sw selected"></i>فرد منتخب</span>
+      <span class="no-print"><i class="sw selected"></i>فرد منتخب</span>
       <span><i class="sw long"></i>شاخه‌های دیگر</span>
       <span><i class="sw ribbon"></i>درگذشته</span>
+      ${S.printing && S.tree?.layout?.markers.size ? `<span><i class="sw marker">۱</i>شمارهٔ یکسان = یک نفر که دو جا آمده (زیر پدر و مادرش و کنار همسرش)</span>` : ""}
     </div>
     ${
       focus
         ? `<div class="legend-row kinds"><b>نسبت با ${esc(fullName(focus))}:</b>${kinds.map((k) => `<span><i class="sw dot" style="background:var(--k-${k})"></i>${KIND_LABELS[k]}</span>`).join("")}</div>`
-        : `<div class="legend-row muted">برای دیدن نسبت هر نفر روی کارتش، یک نفر را «★ من» قرار دهید.</div>`
+        : `<div class="legend-row muted no-print">برای دیدن نسبت هر نفر روی کارتش، یک نفر را «★ من» قرار دهید.</div>`
     }`;
 }
 
@@ -548,8 +566,8 @@ function renderPanel() {
           const cons = S.fam.consanguinity(m);
           const consLabel = cons ? (p.id === m.husband_id ? cons.wifeToHusband : cons.husbandToWife) : "";
           const extra = `<span class="prow-meta">${STATUS_FA[m.status]}${m.marriage_date ? ` · تاریخ ازدواج: ${esc(toFa(m.marriage_date))}` : ""}</span>
-            ${cons ? `<span class="pill cons">♥ ازدواج فامیلی: ${esc(consLabel)}</span>` : ""}`;
-          return `<div class="marriage-wrap ${cons ? "consanguine" : ""}">${prow(id, "", extra)}<button class="btn ghost small" data-marriage="${m.id}">جزئیات ازدواج</button></div>`;
+            ${cons ? `<span class="pill kind-blood">${esc(consLabel)}</span>` : ""}`;
+          return `<div class="marriage-wrap">${prow(id, "", extra)}<button class="btn ghost small" data-marriage="${m.id}">جزئیات ازدواج</button></div>`;
         })
         .join("")}
       ${editor ? `<button class="add-row" data-add="spouse">＋ افزودن ${p.gender === "male" ? "همسر" : "شوهر"}</button>` : !spouses.length ? `<div class="muted">ثبت نشده</div>` : ""}
@@ -679,7 +697,7 @@ function renderUnionPanel(panel, main) {
   const children = S.fam.childrenOf(m.husband_id).filter((c) => person(c).mother_id === m.wife_id);
   panel.innerHTML = `
     <div class="pcard">
-      <div class="pcard-head"><h3>${cons ? "♥ ازدواج فامیلی" : "⚭ ازدواج"}</h3><button class="btn ghost icon-sm" data-close aria-label="بستن">✕</button></div>
+      <div class="pcard-head"><h3>⚭ ازدواج</h3><button class="btn ghost icon-sm" data-close aria-label="بستن">✕</button></div>
       <div class="psec">
         ${prow(h.id, "شوهر")}
         ${prow(w.id, "همسر")}
@@ -691,11 +709,11 @@ function renderUnionPanel(panel, main) {
       </dl>
       ${
         cons
-          ? `<div class="result-box cons-box">
+          ? `<div class="result-box">
           <div>${esc(fullName(w))} <b>${esc(cons.wifeToHusband)}</b>ِ ${esc(fullName(h))} است و ${esc(fullName(h))} <b>${esc(cons.husbandToWife)}</b>ِ ${esc(fullName(w))}.</div>
           <div class="hint" style="margin-top:6px">جدّ مشترک: ${chip(cons.ancestor)} — ${toFa(cons.up)} نسل بالاتر از شوهر و ${toFa(cons.down)} نسل بالاتر از زن. مسیر خونی روی درخت قرمز شده است.</div>
         </div>`
-          : `<p class="hint">نسبت خونی میان زن و شوهر یافت نشد.</p>`
+          : ""
       }
       ${children.length ? `<div class="psec"><h4>فرزندان <span class="muted">(${toFa(children.length)} نفر)</span></h4>${children.map((c) => prow(c, person(c).gender === "male" ? "♂ پسر" : "♀ دختر")).join("")}</div>` : ""}
       ${m.notes ? `<div class="psec"><h4>یادداشت</h4><div class="notes">${esc(m.notes)}</div></div>` : ""}
@@ -1001,7 +1019,7 @@ function openSpouseForm(p) {
       await loadTree();
       const m = S.marriages.find((x) => x.husband_id === (p.gender === "male" ? p.id : sid) && x.wife_id === (p.gender === "male" ? sid : p.id));
       const cons = m && S.fam.consanguinity(m);
-      toast(cons ? `ازدواج فامیلی ثبت شد: ${cons.husbandToWife} و ${cons.wifeToHusband}` : "ازدواج ثبت شد");
+      toast(cons ? `ازدواج ثبت شد (${cons.husbandToWife} و ${cons.wifeToHusband})` : "ازدواج ثبت شد");
     } catch (e) {
       $(".error", el).textContent = e.message;
     }

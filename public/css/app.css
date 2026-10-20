@@ -584,11 +584,6 @@ svg.minimap {
   width: 22px;
   background: var(--line);
 }
-.sw.cons {
-  height: 0;
-  width: 26px;
-  border-top: 2.5px dashed var(--cons);
-}
 .sw.long {
   height: 0;
   width: 26px;
@@ -603,6 +598,17 @@ svg.minimap {
   width: 12px;
   height: 12px;
   background: linear-gradient(135deg, transparent 40%, #111 40%, #111 70%, transparent 70%);
+}
+.sw.marker {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--k-self);
+  color: var(--surface);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 18px;
 }
 .sw.dot {
   width: 12px;
@@ -717,6 +723,19 @@ svg.minimap {
   stroke-width: 3;
 }
 
+.card.copy .card-bg {
+  stroke-dasharray: 4 3;
+}
+.dup-marker circle {
+  fill: var(--k-self);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+.dup-marker text {
+  fill: var(--surface);
+  font-size: 12px;
+  font-weight: 800;
+}
 .rel-badge rect {
   fill: var(--k-blood);
   stroke: var(--surface);
@@ -750,11 +769,6 @@ svg.minimap {
   stroke-width: 1.6;
   stroke-dasharray: 6 5;
 }
-.links .child-line.cons-in {
-  stroke: var(--cons);
-  stroke-width: 2;
-  stroke-dasharray: 6 4;
-}
 .links .spouse-line {
   stroke: var(--ring);
   stroke-width: 2.2;
@@ -766,10 +780,6 @@ svg.minimap {
 .links .spouse-line.divorced {
   stroke: var(--line-soft);
   stroke-dasharray: 3 4;
-}
-.links .spouse-line.consanguine {
-  stroke: var(--cons);
-  stroke-dasharray: 6 4;
 }
 .links .hl {
   stroke: var(--cons) !important;
@@ -796,23 +806,6 @@ svg.minimap {
 .rings.divorced .ring {
   stroke: var(--line-soft);
   stroke-dasharray: 3 2;
-}
-.rings.consanguine .ring {
-  stroke: var(--cons);
-}
-.cons-label text {
-  fill: var(--cons);
-  font-weight: 700;
-  paint-order: stroke;
-  stroke: var(--canvas);
-  stroke-width: 4px;
-  stroke-linejoin: round;
-}
-.cons-title {
-  font-size: 13px;
-}
-.cons-sub {
-  font-size: 12px;
 }
 
 /* ---------- side panel ---------- */
@@ -1013,10 +1006,6 @@ svg.minimap {
   border-radius: 12px;
   margin-bottom: 4px;
 }
-.marriage-wrap.consanguine {
-  background: color-mix(in srgb, var(--cons) 7%, transparent);
-  border: 1px solid color-mix(in srgb, var(--cons) 35%, var(--border));
-}
 .marriage-wrap > .btn {
   margin: 0 6px 6px;
 }
@@ -1122,10 +1111,6 @@ svg.minimap {
   padding: 10px 14px;
   margin-top: 10px;
   font-size: 14px;
-}
-.cons-box {
-  background: color-mix(in srgb, var(--cons) 8%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--cons) 30%, var(--border));
 }
 
 /* ---------- modal & toast ---------- */
@@ -1388,7 +1373,15 @@ table.users td {
   }
 }
 
+@page {
+  size: landscape;
+  margin: 8mm;
+}
 @media print {
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
   .topbar,
   .toolbar,
   .minimap-wrap,
@@ -1403,16 +1396,28 @@ table.users td {
     height: auto;
   }
   .canvas-wrap {
+    display: flex;
+    flex-direction: column;
     height: 100vh;
     background: #fff;
   }
+  svg.tree {
+    flex: 1;
+    min-height: 0;
+    height: auto;
+  }
   .legend {
     display: block;
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
+    position: static;
+    margin: 4px auto 0;
     max-width: none;
     box-shadow: none;
+    backdrop-filter: none;
+  }
+  .empty {
+    display: none;
+  }
+  .no-print {
+    display: none !important;
   }
 }

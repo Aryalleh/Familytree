@@ -56,8 +56,9 @@ function orderBlock(members, adj) {
  * blocks by generation. A cousin marriage just gives a block two parent families — still a DAG.
  * @param {import('./kinship.js').Family} fam  people to draw
  * @param {import('./kinship.js').Family} full the whole family (for consanguinity)
+ * @param {{duplicates?: boolean}} opts duplicates: print style — see below
  */
-export function layoutTree(fam, full = fam) {
+export function layoutTree(fam, full = fam, { duplicates = false } = {}) {
   const has = (id) => id != null && fam.people.has(id);
 
   // --- unions (couples & single parents) ---------------------------------
@@ -106,12 +107,38 @@ export function layoutTree(fam, full = fam) {
     for (const m of block.members) blockOf.set(m, block);
   }
 
+  // --- duplicates (print): every block keeps at most one parent family -----
+  // Someone who married into another branch of the tree (e.g. a cousin) is drawn a second
+  // time under their own parents instead of a long crossing line; both copies share a
+  // numbered marker. Copies use the negated person id.
+  const unions = [...couples.values(), ...singles.values()];
+  const markers = new Map();
+  if (duplicates) {
+    const parentUnion = new Map();
+    for (const u of unions) for (const c of u.children) parentUnion.set(c, u);
+    for (const b of [...blocks]) {
+      const fromOutside = b.members.filter((id) => {
+        const u = parentUnion.get(id);
+        return u && blockOf.get(u.h ?? u.single) !== b;
+      });
+      if (fromOutside.length < 2) continue;
+      fromOutside.sort((a, c) => (fam.get(a).gender === fam.get(c).gender ? a - c : fam.get(a).gender === "male" ? -1 : 1));
+      for (const id of fromOutside.slice(1)) {
+        const u = parentUnion.get(id);
+        u.children = u.children.map((c) => (c === id ? -id : c));
+        const copy = { key: `b${blocks.length}`, members: [-id], width: CARD_W, copy: true };
+        blocks.push(copy);
+        blockOf.set(-id, copy);
+        markers.set(id, markers.size + 1);
+      }
+    }
+  }
+
   // --- dagre ---------------------------------------------------------------
   const g = new dagre.graphlib.Graph({ multigraph: true });
   g.setGraph({ rankdir: "TB", nodesep: 34, ranksep: RANK_SEP, marginx: 40, marginy: 60 });
   g.setDefaultEdgeLabel(() => ({}));
   for (const b of blocks) g.setNode(b.key, { width: b.width, height: CARD_H });
-  const unions = [...couples.values(), ...singles.values()];
   for (const u of unions) {
     const src = blockOf.get(u.h ?? u.single);
     for (const c of u.children) {
@@ -209,7 +236,7 @@ export function layoutTree(fam, full = fam) {
   const rows = [...rowMap.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([y, ids], i) => {
-      const years = ids.map((id) => yearOf(fam.get(id).birth_date)).filter((x) => x);
+      const years = ids.filter((id) => id > 0).map((id) => yearOf(fam.get(id).birth_date)).filter((x) => x);
       const avg = years.length ? Math.round(years.reduce((s, x) => s + x, 0) / years.length / 10) * 10 : null;
       return { y, gen: i + 1, year: avg };
     });
@@ -220,6 +247,7 @@ export function layoutTree(fam, full = fam) {
     pos,
     blocks,
     unions,
+    markers,
     links,
     rows,
     labelX: -LABEL_COL / 2,
@@ -296,8 +324,8 @@ export class TreeView {
    * @param {import('./kinship.js').Family} fam   people to draw
    * @param {import('./kinship.js').Family} full  whole family
    */
-  render(fam, full, state, { relayout = true } = {}) {
-    if (relayout || !this.layout) this.layout = layoutTree(fam, full);
+  render(fam, full, state, { relayout = true, duplicates = false } = {}) {
+    if (relayout || !this.layout) this.layout = layoutTree(fam, full, { duplicates });
     const L = this.layout;
     const { pos } = L;
     this.viewport.replaceChildren();
@@ -317,22 +345,17 @@ export class TreeView {
       if (r.year) text(g, `(حدود ${toFa(r.year)})`, { "text-anchor": "middle", y: 15, class: "gen-year" });
     }
 
-    // members of a cousin marriage get their incoming lines drawn in red
-    const consMembers = new Set();
-    for (const u of L.unions) if (u.consanguinity) consMembers.add(u.h).add(u.w);
-
     for (const l of L.links) {
-      const cls = ["child-line", l.long ? "long" : "", consMembers.has(l.child) ? "cons-in" : "", hlUnions.has(l.union.key) && hl.has(l.child) ? "hl" : ""];
+      const cls = ["child-line", l.long ? "long" : "", hlUnions.has(l.union.key) && hl.has(Math.abs(l.child)) ? "hl" : ""];
       el("path", { d: l.d, class: cls.filter(Boolean).join(" ") }, linkLayer);
     }
 
     for (const u of L.unions) {
       if (u.kind === "single") continue;
-      const cons = u.consanguinity;
       const status = u.marriage?.status || "implicit";
       const h = pos.get(u.h);
       const w = pos.get(u.w);
-      const base = ["spouse-line", cons ? "consanguine" : "", status, hlUnions.has(u.key) ? "hl" : ""].filter(Boolean).join(" ");
+      const base = ["spouse-line", status, hlUnions.has(u.key) ? "hl" : ""].filter(Boolean).join(" ");
       if (u.kind === "ring") {
         const [x1, x2] = h.x < w.x ? [h.x + CARD_W / 2, w.x - CARD_W / 2] : [w.x + CARD_W / 2, h.x - CARD_W / 2];
         el("line", { x1, y1: u.y, x2, y2: u.y, class: base }, linkLayer);
@@ -341,28 +364,26 @@ export class TreeView {
         el("path", { d: `M${h.x},${by} C${h.x},${u.y + 8} ${w.x},${u.y + 8} ${w.x},${by}`, class: base }, linkLayer);
       }
       if (!u.marriage) continue;
-      const g = rings(unionLayer, u.x, u.y, [cons ? "consanguine" : "", status].join(" "));
+      const g = rings(unionLayer, u.x, u.y, status);
       g.setAttribute("tabindex", "0");
       g.addEventListener("click", (e) => {
         e.stopPropagation();
         this.opts.onSelectUnion(u);
       });
       const title = el("title", {}, g);
-      title.textContent = cons ? `ازدواج فامیلی: ${cons.husbandToWife} و ${cons.wifeToHusband}` : "ازدواج";
-      if (cons) {
-        const lg = el("g", { class: "cons-label", transform: `translate(${u.x},${u.y - CARD_H / 2 - 24})` }, unionLayer);
-        text(lg, "ازدواج فامیلی", { "text-anchor": "middle", y: -6, class: "cons-title" });
-        text(lg, `(${cons.husbandToWife} و ${cons.wifeToHusband})`, { "text-anchor": "middle", y: 10, class: "cons-sub" });
-      }
+      title.textContent = "ازدواج";
     }
 
-    for (const p of fam.people.values()) {
-      const { x, y } = pos.get(p.id);
+    const entries = [...fam.people.values()].map((p) => ({ p, key: p.id, copy: false }));
+    for (const b of L.blocks) if (b.copy) entries.push({ p: fam.get(-b.members[0]), key: b.members[0], copy: true });
+    for (const { p, key, copy } of entries) {
+      const { x, y } = pos.get(key);
       const rels = state.relationsTo ? state.relationsTo(p.id) : [];
       const primary = rels[0];
       const classes = [
         "card",
         p.gender,
+        copy ? "copy" : "",
         p.is_deceased ? "deceased" : "",
         p.id === state.selectedId ? "selected" : "",
         kin.has(p.id) ? "kin" : "",
@@ -406,6 +427,15 @@ export class TreeView {
         el("rect", { x: -bw / 2, y: -11, width: bw, height: 21, rx: 10.5 }, bg);
         text(bg, label, { "text-anchor": "middle", dy: "0.35em", direction: "rtl" });
       }
+      const marker = L.markers.get(p.id);
+      if (marker) {
+        // same number on both copies of a person drawn twice (print view)
+        const mg = el("g", { class: "dup-marker", transform: "translate(4,4)" }, g);
+        el("circle", { r: 11 }, mg);
+        text(mg, toFa(marker), { "text-anchor": "middle", dy: "0.36em" });
+        const mt = el("title", {}, mg);
+        mt.textContent = copy ? "همین شخص در جای دیگر درخت، کنار همسرش، هم آمده است" : "همین شخص زیر خانوادهٔ پدر و مادرش هم آمده است";
+      }
     }
     this._renderMinimap(fam);
     this._apply();
@@ -424,7 +454,22 @@ export class TreeView {
     return { x: i.left, y: i.top, w: Math.max(80, r.width - i.left - i.right), h: Math.max(80, r.height - i.top - i.bottom) };
   }
 
+  /** Print: show the whole tree scaled to the page via viewBox instead of the camera. */
+  setPrintView(on) {
+    this.printing = on;
+    if (on && this.layout) {
+      const b = this.layout.bounds;
+      this.svg.setAttribute("viewBox", `${b.x} ${b.y} ${b.w} ${b.h}`);
+      this.svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      this.viewport.removeAttribute("transform");
+    } else {
+      this.svg.removeAttribute("viewBox");
+      this._apply();
+    }
+  }
+
   _apply() {
+    if (this.printing) return;
     const { x, y, k } = this.view;
     this.viewport.setAttribute("transform", `translate(${x},${y}) scale(${k})`);
     this._updateMinimapView();
