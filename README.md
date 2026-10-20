@@ -1,0 +1,59 @@
+# 🌳 شجره‌نامه خاندان — Family Tree on Cloudflare Workers
+
+A Persian (RTL) family-tree maker that runs entirely on **Cloudflare Workers + D1**: no build step and no CSS framework.
+
+## امکانات
+
+- **اولین کاربر = مدیر**: نیازی به راه‌اندازی اولیه نیست. نخستین کسی که وارد سایت شود حساب مدیر را می‌سازد (به‌صورت اتمیک؛ دو درخواست همزمان نمی‌توانند هر دو مدیر شوند).
+- نقش‌ها: **مدیر** (همه‌چیز + مدیریت کاربران و پشتیبان‌گیری)، **ویرایشگر** (افزودن و ویرایش اشخاص)، **بیننده** (فقط دیدن). ثبت‌نام عمومی را مدیر می‌تواند باز یا بسته کند.
+- نمایش بصری کامل درخت: هر نسل در یک ردیف (با برچسب «نسل n» و سال تقریبی)، زن و شوهر کنار هم با نماد حلقهٔ ازدواج، و خطوط فرزندان. شامل نقشهٔ کوچک (minimap)، بزرگ‌نمایی، جابه‌جایی و لمس دوانگشتی.
+- **ازدواج فامیلی** خودکار تشخیص داده می‌شود و با حلقهٔ قرمز، خط‌چین قرمز و برچسبی مثل «(پسرعمو و دخترعمو)» نمایش داده می‌شود. با کلیک روی حلقه، مسیر خونی تا جدّ مشترک قرمز می‌شود.
+- **تمرکز روی فرد انتخابی**: با انتخاب هر شخص، او و همسر و فرزندانش با انیمیشن به مرکز صفحه می‌آیند. حالت «خانوادهٔ نزدیک» فقط والدین، پدربزرگ‌ها، خواهر و برادر، همسر، خانوادهٔ همسر، فرزندان، عروس و داماد و نوه‌ها را نشان می‌دهد.
+- **نسبت‌های فارسی**: یک نفر را «★ من» قرار دهید تا روی کارت هر کس نسبتش نوشته شود: پدر، مادر، پسر، دختر، عروس، داماد، عمو، عمه، دایی، خاله، پسرعمو، دخترخاله، برادرزاده، پدرزن، مادرشوهر، باجناق، جاری، زن‌عمو، شوهرخاله، نامادری، و نسبت‌های ترکیبی مثل «پسرعموی پدر». اگر کسی از چند راه نسبت داشته باشد (مثلاً همسر و دخترعمو) همه نشان داده می‌شوند.
+- ابزار «خویشاوندی با فرد دیگر» برای یافتن نسبت میان هر دو نفر.
+- واکنش‌گرا در موبایل، تبلت و دسکتاپ (پنل کناری در موبایل به برگهٔ پایینی تبدیل می‌شود)، حالت تاریک، و چاپ/PDF.
+- پشتیبان‌گیری و بازیابی JSON. یک نمونه داده در `demo/sample-family.json` هست.
+
+## Setup / راه‌اندازی
+
+```bash
+npm install
+npx wrangler d1 create familytree        # copy the printed database_id into wrangler.toml
+npm run db:migrate:local
+npm run dev                              # http://localhost:8787 — the first sign-up becomes admin
+```
+
+Deploy:
+
+```bash
+npx wrangler login
+npm run deploy                           # applies D1 migrations remotely, then deploys the Worker
+```
+
+To try the demo data, open **مدیریت → پشتیبان‌گیری → بازیابی از فایل** and choose `demo/sample-family.json`.
+
+## Project layout
+
+| Path | What |
+| --- | --- |
+| `src/index.ts` | Worker: JSON API (auth, users, people, marriages, import/export) |
+| `src/auth.ts` | PBKDF2 password hashing, session cookies (stored as SHA-256 hashes in D1) |
+| `migrations/` | D1 schema |
+| `public/js/kinship.js` | Persian kinship engine (blood, in-law and step relations, consanguinity) |
+| `public/js/tree.js` | Layout (dagre over couple blocks) and SVG rendering, pan/zoom, minimap |
+| `public/js/app.js` | UI |
+| `public/vendor/dagre.esm.js` | Vendored [dagre](https://github.com/dagrejs/dagre) (`npm run vendor` refreshes it) |
+
+## Checks
+
+```bash
+npm test          # kinship unit tests
+npm run typecheck
+```
+
+## Security notes
+
+- Passwords: PBKDF2-SHA256, 100k iterations, random salt.
+- Sessions: random 256-bit token in an `HttpOnly; SameSite=Lax; Secure` cookie. Only its hash is stored.
+- API mutations need `Content-Type: application/json`, which blocks cross-site form CSRF.
+- Every route except status/setup/login/register needs a login. The family data is private.

@@ -1,0 +1,21 @@
+{
+  "name": "familytree",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler d1 migrations apply familytree --remote && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply familytree --local",
+    "db:migrate:remote": "wrangler d1 migrations apply familytree --remote",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.js",
+    "vendor": "node scripts/vendor.js"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "@dagrejs/dagre": "^3.1.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.151.3"
+  }
+}
