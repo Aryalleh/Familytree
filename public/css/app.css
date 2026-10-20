@@ -1376,6 +1376,34 @@ table.users td {
   }
 }
 
+/* ---------- offline ---------- */
+
+.net-chip {
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--k-inlaw);
+  color: #fff;
+  border-radius: 99px;
+  padding: 0 7px;
+  line-height: 18px;
+}
+.net-chip.off {
+  background: var(--k-step);
+}
+body.is-offline .topbar {
+  box-shadow: inset 0 -3px 0 var(--k-step);
+}
+ol.ops {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+label.btn.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 /* ---------- hover card ---------- */
 
 .tip {
@@ -1461,6 +1489,54 @@ table.users td {
 .print-svg {
   display: block;
   flex: none;
+}
+.print-body {
+  display: flex;
+  flex-direction: column;
+}
+.print-body.beside {
+  flex-direction: row;
+}
+.print-notes {
+  flex: none;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.55;
+  border-top: 1px solid #bbb;
+  padding: 6px 2px 0;
+  columns: 2;
+  column-gap: 18px;
+}
+.print-body.beside .print-notes {
+  /* RTL row: the tree on the right, the note list in the left-hand column */
+  border-top: 0;
+  border-inline-start: 1px solid #bbb;
+  padding: 0;
+  padding-inline-start: 10px;
+  columns: 1;
+}
+.print-notes h3 {
+  font-size: 13px;
+  margin: 0 0 4px;
+  column-span: all;
+}
+.print-notes ol {
+  margin: 0;
+  padding-inline-start: 22px;
+}
+.print-notes li {
+  margin-bottom: 4px;
+  break-inside: avoid;
+  white-space: pre-wrap;
+}
+.print-notes .none {
+  color: #666;
+  margin: 0;
+}
+.note-ref {
+  font-size: 12.5px;
+  font-weight: 800;
+  fill: var(--primary);
 }
 .print-foot {
   height: 36px;

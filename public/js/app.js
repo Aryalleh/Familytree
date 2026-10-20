@@ -1,6 +1,7 @@
 import { Family, KIND_LABELS } from "./kinship.js";
 import { TreeView, lifeSpan, toFa } from "./tree.js";
 import { prepare, planPages, renderPages, PAPERS } from "./print.js";
+import { OfflineError, local, applyOps, editType, queueEdit, replay, describeOp, CHANGES_FORMAT } from "./offline.js";
 
 // ---------------------------------------------------------------------------
 // utilities
@@ -12,13 +13,37 @@ function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
+/**
+ * Call the API. Family-tree edits made while offline (or when the network drops mid-call)
+ * are queued locally instead — see offline.js.
+ */
 async function api(method, path, data) {
-  const res = await fetch(path, {
-    method,
-    headers: data !== undefined ? { "Content-Type": "application/json" } : {},
-    body: data !== undefined ? JSON.stringify(data) : undefined,
-    credentials: "same-origin",
-  });
+  const edit = method !== "GET" && editType(method, path);
+  // while offline edits wait to be sent, new ones join the queue so they stay in order
+  if (edit && (S.offline || local.ops(S.user?.id).length)) return editOffline(method, path, data);
+  try {
+    return await apiFetch(method, path, data);
+  } catch (e) {
+    if (edit && e instanceof OfflineError) {
+      goOffline();
+      return editOffline(method, path, data);
+    }
+    throw e;
+  }
+}
+
+async function apiFetch(method, path, data) {
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: data !== undefined ? { "Content-Type": "application/json" } : {},
+      body: data !== undefined ? JSON.stringify(data) : undefined,
+      credentials: "same-origin",
+    });
+  } catch {
+    throw new OfflineError("اتصال به سرور برقرار نیست");
+  }
   let payload = null;
   try {
     payload = await res.json();
@@ -111,8 +136,13 @@ function prefs() {
 
 async function savePrefs(next) {
   const merged = { ...prefs(), ...next };
-  await api("PUT", "/api/me/prefs", { prefs: merged });
   S.user.prefs = JSON.stringify(merged);
+  local.setLastUser(S.user);
+  try {
+    await api("PUT", "/api/me/prefs", { prefs: merged });
+  } catch (e) {
+    if (!(e instanceof OfflineError)) throw e;
+  }
 }
 
 /** "علی رحیمی فرزند حسن فرزند محمد" — names repeat a lot in a family, so pickers show lineage. */
@@ -144,13 +174,24 @@ function setFocus(id) {
 // boot & auth screens
 
 async function boot() {
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   try {
     S.status = await api("GET", "/api/status");
+    S.offline = false;
   } catch (e) {
-    $("#app").innerHTML = `<div class="boot">${esc(e.message)}</div>`;
+    const last = e instanceof OfflineError && local.lastUser();
+    if (last && local.snapshot(last.id)) {
+      // no connection: open the last copy of the tree saved on this device
+      S.user = last;
+      S.offline = true;
+      renderMain();
+      return;
+    }
+    $("#app").innerHTML = `<div class="boot"><div style="text-align:center">${esc(e.message)}${e instanceof OfflineError ? "<br><span class='muted'>برای استفادهٔ آفلاین، یک بار آنلاین وارد شوید.</span>" : ""}</div></div>`;
     return;
   }
   S.user = S.status.user;
+  if (S.user) local.setLastUser(S.user);
   if (S.status.setupRequired) renderAuth("setup");
   else if (!S.user) renderAuth("login");
   else renderMain();
@@ -231,6 +272,7 @@ function renderMain() {
           <button class="nav-btn" data-act="list" title="فهرست افراد"><span class="ico">👥</span><span class="lbl">فهرست افراد</span></button>
           <button class="nav-btn" data-act="finder" title="خویشاوندی"><span class="ico">🔗</span><span class="lbl">خویشاوندی</span></button>
           ${canEdit() ? `<button class="nav-btn" data-act="add" title="افزودن شخص"><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>` : ""}
+          <button class="nav-btn" data-act="sync" title="آفلاین و همگام‌سازی"><span class="ico">☁️</span><span class="lbl">آفلاین</span><span class="net-chip" hidden></span></button>
           <button class="nav-btn" data-act="settings" title="تنظیمات"><span class="ico">🛠️</span><span class="lbl">تنظیمات</span></button>
           ${isAdmin() ? `<button class="nav-btn" data-act="users" title="مدیریت"><span class="ico">⚙️</span><span class="lbl">مدیریت</span></button>` : ""}
         </nav>
@@ -288,14 +330,21 @@ function renderMain() {
   $("[data-act=print]").addEventListener("click", () => openPrintDialog());
   window.addEventListener("beforeprint", () => {
     // Ctrl+P without the print dialog: print the whole tree on one page
-    if (!$("#print-root").children.length) buildPrint({ from: 1, to: 999, paper: "a4l", mode: "one" });
+    if (!$("#print-root").children.length) buildPrint({ from: 1, to: 999, paper: "a4l", mode: "one", notes: "list" });
   });
   window.addEventListener("afterprint", () => $("#print-root").replaceChildren());
   $("[data-act=logout]").addEventListener("click", async () => {
+    const pending = local.ops(S.user.id).length;
+    if (pending && !confirm(`${toFa(pending)} تغییرِ ارسال‌نشده دارید که با خروج از این دستگاه پاک می‌شود. ادامه می‌دهید؟`)) return;
     await api("POST", "/api/logout", {}).catch(() => {});
+    local.clear(S.user.id);
     S.user = null;
     boot();
   });
+  $("[data-act=sync]").addEventListener("click", () => openSync());
+  window.addEventListener("online", () => checkOnline());
+  window.addEventListener("offline", () => goOffline());
+  updateNetChip();
   $$("[data-zoom]").forEach((b) => b.addEventListener("click", () => toolbarAction(b.dataset.zoom)));
   updateModeLabel();
   initSearch();
@@ -367,9 +416,24 @@ function updateModeLabel() {
 
 async function loadTree({ fit = false } = {}) {
   try {
-    const [data] = await Promise.all([api("GET", "/api/tree"), document.fonts?.ready]);
-    S.people = data.people;
-    S.marriages = data.marriages;
+    let data;
+    if (!S.offline) {
+      try {
+        [data] = await Promise.all([apiFetch("GET", "/api/tree"), document.fonts?.ready]);
+        local.setSnapshot(S.user.id, { ...data, saved_at: new Date().toISOString() });
+      } catch (e) {
+        if (!(e instanceof OfflineError)) throw e;
+        goOffline();
+      }
+    }
+    if (!data) {
+      data = local.snapshot(S.user.id);
+      if (!data) throw new Error("نسخهٔ آفلاینی از شجره‌نامه روی این دستگاه نیست");
+    }
+    // edits not yet sent to the server are shown on top of the last known data
+    const merged = applyOps(data.people, data.marriages, local.ops(S.user.id));
+    S.people = merged.people;
+    S.marriages = merged.marriages;
     S.fam = new Family(S.people, S.marriages);
     S.relCache.clear();
     if (S.focusId == null) {
@@ -449,7 +513,7 @@ function redraw(relayout = false) {
 
   const kin = new Set(S.selectedId != null && person(S.selectedId) ? familyIds(S.selectedId).slice(1) : []);
   const pr = prefs();
-  const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, notesOnTree: pr.notesOnTree };
+  const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0 };
   S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation });
   renderLegend();
 }
@@ -1335,6 +1399,141 @@ async function openAdmin() {
 }
 
 // ---------------------------------------------------------------------------
+// offline
+
+function editOffline(method, path, data) {
+  if (!canEdit()) throw new Error("دسترسی ویرایش ندارید");
+  const base = local.snapshot(S.user.id);
+  if (!base) throw new OfflineError("نسخهٔ آفلاینی از شجره‌نامه روی این دستگاه نیست");
+  const { ops, response } = queueEdit(local.ops(S.user.id), base, method, path, data);
+  if (!local.setOps(S.user.id, ops)) throw new Error("حافظهٔ مرورگر پر است؛ تغییرات را در فایل ذخیره کنید");
+  updateNetChip();
+  return response;
+}
+
+function goOffline() {
+  if (S.offline) return;
+  S.offline = true;
+  updateNetChip();
+  toast("اتصال قطع است؛ تغییرات روی همین دستگاه ذخیره می‌شوند");
+}
+
+async function checkOnline() {
+  try {
+    const st = await apiFetch("GET", "/api/status");
+    if (!st.user) return; // session expired: the next real call shows the login screen
+    S.offline = false;
+    updateNetChip();
+    const n = local.ops(S.user.id).length;
+    toast(n ? `اتصال برقرار شد؛ ${toFa(n)} تغییر آمادهٔ ارسال است` : "اتصال برقرار شد");
+    loadTree();
+  } catch {
+    // still offline
+  }
+}
+
+function updateNetChip() {
+  const chip = $(".net-chip");
+  if (!chip || !S.user) return;
+  const n = local.ops(S.user.id).length;
+  chip.hidden = !S.offline && !n;
+  chip.textContent = S.offline ? (n ? `آفلاین · ${toFa(n)}` : "آفلاین") : `${toFa(n)} تغییر`;
+  chip.classList.toggle("off", !!S.offline);
+  document.body.classList.toggle("is-offline", !!S.offline);
+}
+
+function download(name, data) {
+  const blob = new Blob([JSON.stringify(data, null, 1)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => (URL.revokeObjectURL(a.href), a.remove()), 1000);
+}
+
+function stamp() {
+  return new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+}
+
+function showReplayResult(res, el) {
+  const lines = res.failed.map((f) => `<li>${esc(describeOp(f.op, (id) => fullName(person(id))))}: <span class="error">${esc(f.error)}</span></li>`).join("");
+  $("[data-result]", el).innerHTML = `<div class="result-box"><b>${toFa(res.done)} تغییر روی سرور ثبت شد.</b>${res.failed.length ? `<div class="error">${toFa(res.failed.length)} تغییر ثبت نشد:</div><ul>${lines}</ul>` : ""}</div>`;
+}
+
+function openSync() {
+  const ops = local.ops(S.user.id);
+  const snap = local.snapshot(S.user.id);
+  const nameOf = (id) => (person(id) ? fullName(person(id)) : "");
+  const { el, close } = modal({
+    title: "آفلاین و همگام‌سازی",
+    wide: true,
+    body: `
+      <p>${S.offline ? `<span class="pill kind-step">آفلاین</span> اتصال به سرور برقرار نیست.` : `<span class="pill kind-child">آنلاین</span> به سرور وصل هستید.`}
+        ${snap?.saved_at ? `<span class="muted">آخرین نسخهٔ ذخیره‌شده روی این دستگاه: ${esc(toFa(new Date(snap.saved_at).toLocaleString("fa-IR")))}</span>` : ""}</p>
+      <p class="hint">این برنامه روی دستگاه نصب‌شدنی است (منوی مرورگر ← «نصب» یا «افزودن به صفحهٔ اصلی») و بدون اینترنت هم شجره‌نامه را نشان می‌دهد. تغییراتی که آفلاین بدهید روی همین دستگاه می‌ماند تا آن‌ها را به سرور بفرستید یا در فایل ذخیره کنید.</p>
+      <div class="section-title">تغییرات ارسال‌نشده (${toFa(ops.length)})</div>
+      ${ops.length ? `<ol class="ops">${ops.map((o) => `<li>${esc(describeOp(o, nameOf))}</li>`).join("")}</ol>` : `<p class="muted">تغییری در صف نیست.</p>`}
+      <div class="actions">
+        <button class="btn primary" data-send ${ops.length && !S.offline ? "" : "disabled"}>⬆ ارسال تغییرات به سرور</button>
+        <button class="btn" data-save-ops ${ops.length ? "" : "disabled"}>💾 ذخیرهٔ تغییرات در فایل JSON</button>
+        <button class="btn danger" data-drop ${ops.length ? "" : "disabled"}>دور ریختن تغییرات</button>
+      </div>
+      <div class="section-title">فایل‌ها</div>
+      <div class="actions">
+        <label class="btn ${S.offline ? "disabled" : ""}">⬆ بارگذاری فایل تغییرات روی سرور<input type="file" accept="application/json,.json" hidden data-upload ${S.offline || !canEdit() ? "disabled" : ""}></label>
+        <button class="btn" data-full>⬇ دریافت نسخهٔ کامل (JSON)</button>
+      </div>
+      <p class="hint">«فایل تغییرات» فقط کارهایی را دارد که آفلاین انجام داده‌اید؛ بعداً روی سرور اصلی بارگذاری می‌شود و تغییرات به ترتیب ثبت می‌شوند. اگر کسی در این فاصله همان شخص را ویرایش کرده باشد، ویرایش شما جایگزین می‌شود.</p>
+      <div data-result></div>`,
+  });
+  $("[data-save-ops]", el).addEventListener("click", () =>
+    download(`familytree-changes-${stamp()}.json`, { format: CHANGES_FORMAT, created_at: new Date().toISOString(), user: S.user.username, base_saved_at: snap?.saved_at, ops }),
+  );
+  $("[data-full]", el).addEventListener("click", () =>
+    download(`familytree-${stamp()}.json`, { format: "familytree/v1", exported_at: new Date().toISOString(), people: S.people, marriages: S.marriages }),
+  );
+  $("[data-drop]", el).addEventListener("click", async () => {
+    if (!confirm("همهٔ تغییرات ارسال‌نشده پاک شود؟")) return;
+    local.setOps(S.user.id, []);
+    close();
+    updateNetChip();
+    await loadTree();
+  });
+  $("[data-send]", el).addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const res = await replay(local.ops(S.user.id), apiFetch);
+      local.setOps(S.user.id, res.remaining);
+      updateNetChip();
+      showReplayResult(res, el);
+      await loadTree();
+    } catch (ex) {
+      if (ex instanceof OfflineError) goOffline();
+      toast(ex.message, true);
+      e.target.disabled = false;
+    }
+  });
+  $("[data-upload]", el).addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (data.format !== CHANGES_FORMAT || !Array.isArray(data.ops)) throw new Error("این فایل، فایل تغییرات شجره‌نامه نیست");
+      if (!confirm(`${toFa(data.ops.length)} تغییر${data.user ? ` از «${data.user}»` : ""} روی سرور ثبت شود؟`)) return;
+      const res = await replay(data.ops, apiFetch);
+      showReplayResult(res, el);
+      if (res.remaining.length) download(`familytree-changes-failed-${stamp()}.json`, { ...data, ops: res.remaining });
+      await loadTree();
+    } catch (ex) {
+      toast(ex.message, true);
+    } finally {
+      e.target.value = "";
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // settings
 
 function openSettings() {
@@ -1352,7 +1551,7 @@ function openSettings() {
         <label class="check"><input type="radio" name="orientation" value="horizontal" ${pr.orientation === "horizontal" ? "checked" : ""}> افقی: نسل‌ها از راست به چپ، فرزندان زیر هم (برای خانواده‌های پرجمعیت، کم‌عرض‌تر)</label>
       </div>
       <label class="check"><input type="checkbox" name="hoverTip" ${pr.hoverTip ? "checked" : ""}> نمایش اطلاعات و یادداشت با نگه داشتن موس روی هر نفر</label>
-      <label class="check"><input type="checkbox" name="notesOnTree" ${pr.notesOnTree ? "checked" : ""}> نمایش یادداشت روی کارت‌های شجره‌نامه (در چاپ هم می‌آید)</label>
+      <label class="check"><input type="checkbox" name="notesOnTree" ${pr.notesOnTree ? "checked" : ""}> نمایش یادداشت روی کارت‌های شجره‌نامه (برای چاپ، شیوهٔ نمایش یادداشت در پنجرهٔ چاپ انتخاب می‌شود)</label>
       <p class="hint">این تنظیمات برای حساب شما ذخیره می‌شود و روی همهٔ دستگاه‌هایتان اعمال می‌شود.</p>
       <div class="error"></div>
     </form>`,
@@ -1393,25 +1592,26 @@ function openSettings() {
 const PRINT_LEGEND = `<span><i class="sw male"></i>مرد</span><span><i class="sw female"></i>زن</span>
   <span><i class="sw rings-sw">⚭</i>ازدواج</span><span><i class="sw ribbon"></i>درگذشته</span>
   <span><i class="sw marker">۱</i>شمارهٔ یکسان: یک نفر که دو جا آمده (زیر پدر و مادرش و کنار همسرش)</span>
-  <span>▼ ادامهٔ شاخه در صفحهٔ دیگر</span>`;
+  <span>▼ ادامهٔ شاخه در صفحهٔ دیگر</span><span>✎۱ شمارهٔ یادداشت در فهرست همین صفحه</span>`;
 
 let printPrep = null;
 
 function buildPrint(opts) {
-  const pr = prefs();
-  const orientation = opts.orientation || pr.orientation;
-  if (!printPrep || printPrep.fam !== S.fam || printPrep.orientation !== orientation || printPrep.notes !== pr.notesOnTree) {
-    printPrep = { ...prepare(S.fam, { orientation, notesOnTree: pr.notesOnTree }), fam: S.fam, notes: pr.notesOnTree };
+  const orientation = opts.orientation || prefs().orientation;
+  const notes = opts.notes || "list";
+  if (!printPrep || printPrep.fam !== S.fam || printPrep.orientation !== orientation || printPrep.notesMode !== notes) {
+    printPrep = { ...prepare(S.fam, { orientation, notes }), fam: S.fam, notesMode: notes };
   }
   const plan = planPages(printPrep, { ...opts, to: Math.min(opts.to, printPrep.generations) });
-  renderPages($("#print-root"), plan, printPrep, { title: "شجره‌نامه خاندان", notesOnTree: pr.notesOnTree, legendHtml: PRINT_LEGEND });
+  renderPages($("#print-root"), plan, printPrep, { title: "شجره‌نامه خاندان", legendHtml: PRINT_LEGEND });
   return plan;
 }
 
 function openPrintDialog() {
   if (!S.people.length) return toast("شجره‌نامه خالی است");
   const pr = prefs();
-  const gens = prepare(S.fam, { orientation: pr.orientation, notesOnTree: pr.notesOnTree }).generations;
+  const gens = prepare(S.fam, { orientation: pr.orientation, notes: "none" }).generations;
+  const anyNotes = S.people.some((p) => p.notes);
   const genOpts = (sel) => Array.from({ length: gens }, (_, i) => `<option value="${i + 1}" ${i + 1 === sel ? "selected" : ""}>نسل ${toFa(i + 1)}</option>`).join("");
   const { el, close } = modal({
     title: "چاپ شجره‌نامه",
@@ -1426,6 +1626,11 @@ function openPrintDialog() {
           <option value="vertical" ${pr.orientation !== "horizontal" ? "selected" : ""}>عمودی (نسل‌ها بالا به پایین)</option>
           <option value="horizontal" ${pr.orientation === "horizontal" ? "selected" : ""}>افقی (فرزندان زیر هم)</option>
         </select></label>
+      </div>
+      <div class="field"><span>یادداشت‌ها${anyNotes ? "" : " (هنوز کسی یادداشت ندارد)"}</span>
+        <label class="check"><input type="radio" name="notes" value="list" checked> فهرست یادداشت‌ها در گوشهٔ هر صفحه (کنار هر نام شمارهٔ یادداشت می‌آید)</label>
+        <label class="check"><input type="radio" name="notes" value="card"> یادداشت هر شخص روی کارت، کنار نامش</label>
+        <label class="check"><input type="radio" name="notes" value="none"> بدون یادداشت</label>
       </div>
       <div class="field"><span>تقسیم صفحه‌ها</span>
         <label class="check"><input type="radio" name="mode" value="auto" checked> خودکار: هر شاخه و زیرشاخه در یک صفحه، با اندازهٔ خوانا
@@ -1444,6 +1649,7 @@ function openPrintDialog() {
     to: Math.max(Number(form.from.value), Number(form.to.value)),
     paper: form.paper.value,
     orientation: form.orientation.value,
+    notes: form.notes.value,
     mode: form.mode.value,
     size: form.size.value,
     pages: Number(form.pages.value) || 1,

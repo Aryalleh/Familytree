@@ -1,0 +1,11 @@
+{
+  "name": "شجره‌نامه خاندان",
+  "short_name": "شجره‌نامه",
+  "lang": "fa",
+  "dir": "rtl",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#15803d",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

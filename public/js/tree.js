@@ -3,7 +3,8 @@ import dagre from "../vendor/dagre.esm.js";
 
 export const CARD_W = 172;
 export const CARD_H = 62;
-export const CARD_H_NOTES = 84;
+/** Card height with room for `lines` lines of notes. */
+export const cardHeight = (lines = 0) => (lines > 0 ? 66 + lines * 15 : CARD_H);
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 const FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
@@ -381,6 +382,29 @@ function fitText(t, maxW) {
   while (n > 1 && t.getComputedTextLength() > maxW) t.textContent = full.slice(0, --n) + "…";
 }
 
+/** Word-wrap `str` into at most `lines` SVG text lines, ellipsising the last one. */
+function wrapText(parent, str, { x, y, maxW, lines, cls }) {
+  const words = str.replace(/\s+/g, " ").trim().split(" ");
+  let i = 0;
+  for (let n = 0; n < lines && i < words.length; n++) {
+    const t = text(parent, words[i], { x, y: y + n * 15, class: cls, "text-anchor": "start", direction: "rtl" });
+    i++;
+    while (i < words.length) {
+      const before = t.textContent;
+      t.textContent = `${before} ${words[i]}`;
+      if (t.getComputedTextLength() > maxW) {
+        t.textContent = before;
+        break;
+      }
+      i++;
+    }
+    if (n === lines - 1 && i < words.length) {
+      t.textContent += " …";
+      fitText(t, maxW);
+    } else fitText(t, maxW);
+  }
+}
+
 function rings(parent, x, y, cls) {
   const g = el("g", { class: `rings ${cls}`, transform: `translate(${x},${y})` }, parent);
   el("circle", { r: 13, class: "ring-bg" }, g);
@@ -392,7 +416,7 @@ function rings(parent, x, y, cls) {
 /**
  * Draw a positioned layout into `root` (an SVG <g>).
  * @param {object} L  result of positionModel
- * @param {object} state  {defs, focusId, selectedId, kin, highlight, highlightUnions, relationsTo, notesOnTree, cont}
+ * @param {object} state  {defs, focusId, selectedId, kin, highlight, highlightUnions, relationsTo, noteLines, noteRefs, noteIcon, cont}
  * @param {object} on  event handlers {person(id), union(u), hover(p, evt|null)}
  */
 export function drawLayout(root, L, state = {}, on = {}) {
@@ -498,10 +522,12 @@ export function drawLayout(root, L, state = {}, on = {}) {
     const span = lifeSpan(p);
     if (span) fitText(text(g, `(${span})`, { x: cw - 12, y: 47, class: "card-sub", "text-anchor": "start", direction: "rtl" }), maxW);
     if (p.notes) {
-      if (state.notesOnTree) {
-        const note = p.notes.replace(/\s+/g, " ");
-        fitText(text(g, note, { x: cw - 12, y: 72, class: "card-note", "text-anchor": "start", direction: "rtl" }), cw - 24);
-      } else {
+      if (state.noteLines > 0) {
+        wrapText(g, p.notes, { x: cw - 12, y: 72, maxW: cw - 24, lines: state.noteLines, cls: "card-note" });
+      } else if (state.noteRefs?.has(p.id)) {
+        // numbered reference into the page's note list (print)
+        text(g, `✎${toFa(state.noteRefs.get(p.id))}`, { x: 10, y: ch - 8, class: "note-ref" });
+      } else if (state.noteIcon !== false) {
         text(g, "✎", { x: 10, y: ch - 8, class: "note-icon" });
       }
     }
@@ -562,7 +588,7 @@ export class TreeView {
    */
   render(fam, full, state, { relayout = true, orientation = "vertical" } = {}) {
     if (relayout || !this.layout) {
-      this.layout = layoutTree(fam, full, { orientation, cardH: state.notesOnTree ? CARD_H_NOTES : CARD_H });
+      this.layout = layoutTree(fam, full, { orientation, cardH: cardHeight(state.noteLines) });
     }
     drawLayout(this.viewport, this.layout, { ...state, defs: this.defs }, {
       person: (id) => this.opts.onSelectPerson(id),

@@ -12,6 +12,8 @@ A Persian (RTL) family-tree maker that runs entirely on **Cloudflare Workers + D
   - بازهٔ نسل‌ها («از نسل … تا نسل …») و اندازه و جهت کاغذ (A4 و A3، افقی یا عمودی)
   - تقسیم صفحه‌ها: خودکار (هر شاخه و زیرشاخه در یک صفحه با اندازهٔ خوانای ریز، متوسط یا درشت)، تعداد صفحهٔ دلخواه، یا همه در یک صفحه
   - شاخه‌ای که ادامه دارد برچسب «ادامه در صفحهٔ n» می‌گیرد. کسی که هم فرزند یک خانواده است و هم همسر کسی در شاخهٔ دیگر، دو جا می‌آید و هر دو کارتش شمارهٔ یکسانی دارند.
+- **یادداشت‌ها در چاپ** سه حالت دارند: فهرست یادداشت‌ها در گوشهٔ هر صفحه (کنار هر نام شمارهٔ یادداشتش می‌آید)، یادداشت کامل روی کارت هر شخص کنار نامش، یا بدون یادداشت. اگر یک خانواده آن‌قدر فرزند داشته باشد که در یک صفحه جا نشوند، فرزندان در چند صفحه پخش می‌شوند و پدر و مادر بالای هر صفحه تکرار می‌شوند.
+- **آفلاین (PWA)**: برنامه نصب‌شدنی است و بدون اینترنت آخرین نسخهٔ شجره‌نامه را روی همان دستگاه نشان می‌دهد. ویرایش‌هایی که آفلاین انجام شوند در صف می‌مانند. پس از وصل شدن، با یک دکمه به سرور فرستاده می‌شوند، یا می‌توان آن‌ها را در یک «فایل تغییرات» JSON ذخیره کرد و بعداً از بخش «☁️ آفلاین» روی سرور اصلی بارگذاری کرد. افراد تازه‌ای که آفلاین ساخته شوند شناسهٔ موقت می‌گیرند که هنگام ارسال به شناسهٔ واقعی تبدیل می‌شود.
 - **تنظیمات** (برای هر کاربر جداگانه ذخیره می‌شود):
   - تعداد نسلِ نام پدران کنار نام افراد در فهرست‌ها و انتخاب‌ها، مثل «علی رحیمی فرزند حسن فرزند محمد»
   - چیدمان عمودی، یا افقی که در آن فرزندان زیر هم می‌آیند و درخت کم‌عرض‌تر می‌شود
@@ -50,6 +52,9 @@ To try the demo data, open **مدیریت → پشتیبان‌گیری → با
 | `migrations/` | D1 schema |
 | `public/js/kinship.js` | Persian kinship engine (blood, in-law and step relations, consanguinity) |
 | `public/js/tree.js` | Layout (dagre over couple blocks) and SVG rendering, pan/zoom, minimap |
+| `public/js/print.js` | Print planning: generation range, branch-per-page pagination, note list |
+| `public/js/offline.js` | Offline snapshot, queue of offline edits, replay / changes file |
+| `public/sw.js` | Service worker that keeps the app shell available offline |
 | `public/js/app.js` | UI |
 | `public/vendor/dagre.esm.js` | Vendored [dagre](https://github.com/dagrejs/dagre) (`npm run vendor` refreshes it) |
 
