@@ -36,10 +36,12 @@ async function api(method, path, data) {
 async function apiFetch(method, path, data) {
   let res;
   try {
+    // every non-GET call is JSON (the server refuses anything else, as a CSRF guard)
+    const json = method !== "GET";
     res = await fetch(path, {
       method,
-      headers: data !== undefined ? { "Content-Type": "application/json" } : {},
-      body: data !== undefined ? JSON.stringify(data) : undefined,
+      headers: json ? { "Content-Type": "application/json" } : {},
+      body: json ? JSON.stringify(data ?? {}) : undefined,
       credentials: "same-origin",
     });
   } catch {
@@ -56,7 +58,8 @@ async function apiFetch(method, path, data) {
       S.user = null;
       boot();
     }
-    throw new Error(payload?.error || `خطا (${res.status})`);
+    // status and body travel with the error (conflict details, "gone", …)
+    throw Object.assign(new Error(payload?.error || `خطا (${res.status})`), { status: res.status, data: payload });
   }
   return payload;
 }
@@ -295,6 +298,7 @@ function renderMain() {
           <button class="nav-btn" data-act="list" title="فهرست افراد"><span class="ico">👥</span><span class="lbl">فهرست افراد</span></button>
           <button class="nav-btn" data-act="finder" title="خویشاوندی"><span class="ico">🔗</span><span class="lbl">خویشاوندی</span></button>
           <button class="nav-btn" data-act="add" title="افزودن شخص" hidden><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>
+          <button class="nav-btn" data-act="changes" title="آخرین تغییرات"><span class="ico">🕘</span><span class="lbl">تغییرات</span></button>
           <button class="nav-btn" data-act="sync" title="آفلاین و همگام‌سازی"><span class="ico">☁️</span><span class="lbl">آفلاین</span><span class="net-chip" hidden></span></button>
           <button class="nav-btn" data-act="settings" title="تنظیمات"><span class="ico">🛠️</span><span class="lbl">تنظیمات</span></button>
           ${isAdmin() ? `<button class="nav-btn" data-act="users" title="مدیریت"><span class="ico">⚙️</span><span class="lbl">مدیریت</span></button>` : ""}
@@ -367,6 +371,7 @@ function renderMain() {
     boot();
   });
   $("[data-act=sync]").addEventListener("click", () => openSync());
+  $("[data-act=changes]").addEventListener("click", () => openRecentChanges());
   window.addEventListener("online", () => checkOnline());
   window.addEventListener("offline", () => goOffline());
   updateNetChip();
@@ -376,7 +381,8 @@ function renderMain() {
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#modal-root").children.length) clearSelection();
   });
-  loadTree({ fit: true });
+  // offline edits still waiting from an earlier session go out as soon as the tree is loaded
+  loadTree({ fit: true }).then(() => autoSync());
 }
 
 /** Parts of the canvas covered by floating UI, so "centre" means the visible centre. */
@@ -902,8 +908,9 @@ function renderPanel() {
         <button data-tab="info" class="${tab === "info" ? "active" : ""}">مشخصات</button>
         <button data-tab="family" class="${tab === "family" ? "active" : ""}">خانواده</button>
         <button data-tab="notes" class="${tab === "notes" ? "active" : ""}">یادداشت‌ها</button>
+        ${isTemp(p.id) ? "" : `<button data-tab="history" class="${tab === "history" ? "active" : ""}">تاریخچه</button>`}
       </div>
-      <div class="ptab-body">${tab === "info" ? infoTab : tab === "notes" ? notesTab : familyTab}</div>
+      <div class="ptab-body">${tab === "info" ? infoTab : tab === "notes" ? notesTab : tab === "history" && !isTemp(p.id) ? `<div data-history class="muted">در حال بارگذاری…</div>` : familyTab}</div>
     </div>
 
     ${
@@ -932,6 +939,8 @@ function renderPanel() {
       renderPanel();
     }),
   );
+  const hist = $("[data-history]", panel);
+  if (hist) loadPersonHistory(p, hist);
   $$("[data-goto]", panel).forEach((b) => b.addEventListener("click", () => selectPerson(Number(b.dataset.goto))));
   $$("[data-marriage]", panel).forEach((b) =>
     b.addEventListener("click", () => {
@@ -1015,7 +1024,7 @@ function renderUnionPanel(panel, main) {
   $("[data-act=delete]", panel)?.addEventListener("click", async () => {
     if (!confirm("این ازدواج حذف شود؟ (اشخاص و فرزندان حذف نمی‌شوند)")) return;
     try {
-      await api("DELETE", `/api/marriages/${m.id}`);
+      if (!(await saveWithConflicts("DELETE", `/api/marriages/${m.id}?base_version=${m.version ?? ""}`))) return;
       toast("ازدواج حذف شد");
       S.selectedUnion = null;
       await loadTree();
@@ -1090,7 +1099,7 @@ function openPeopleList() {
 // ---------------------------------------------------------------------------
 // modals
 
-function modal({ title, body, wide = false, foot = "" }) {
+function modal({ title, body, wide = false, foot = "", onClose = null }) {
   const root = $("#modal-root");
   const wrap = document.createElement("div");
   wrap.className = "modal-backdrop";
@@ -1100,9 +1109,13 @@ function modal({ title, body, wide = false, foot = "" }) {
       ${foot ? `<div class="modal-foot">${foot}</div>` : ""}
     </div>`;
   root.appendChild(wrap);
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     wrap.remove();
     document.removeEventListener("keydown", onKey);
+    onClose?.();
   };
   const onKey = (e) => e.key === "Escape" && close();
   document.addEventListener("keydown", onKey);
@@ -1196,10 +1209,18 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
       notes: fd.get("notes"),
     };
     if (preset.spouse_of && !isEdit) data.spouse_of = preset.spouse_of;
+    let send = data;
+    if (isEdit) {
+      // send only what changed, plus the version it was based on, so the server can merge
+      send = Object.fromEntries(Object.entries(data).filter(([k, v]) => !sameValue(v, existing[k])));
+      if (!Object.keys(send).length) return close();
+      send.base_version = existing.version;
+    }
     const btn = $("[data-save]", el);
     btn.disabled = true;
     try {
-      const res = isEdit ? await api("PUT", `/api/people/${existing.id}`, data) : await api("POST", "/api/people", data);
+      const res = isEdit ? await saveWithConflicts("PUT", `/api/people/${existing.id}`, send) : await api("POST", "/api/people", send);
+      if (!res) return;
       if (after) await after(res.person);
       close();
       toast(isEdit ? "تغییرات ذخیره شد" : `${fullName(res.person)} افزوده شد`);
@@ -1260,7 +1281,7 @@ function openParentForm(p, male) {
   // suggest the known parent's spouse (e.g. the father's wife when adding a mother)
   const suggested = otherParent ? S.fam.spousesOf(otherParent).map((s) => s.id).find((id) => allowed(person(id))) ?? null : null;
   const link = async (parentId) => {
-    await api("PUT", `/api/people/${p.id}`, { [key]: parentId });
+    await saveWithConflicts("PUT", `/api/people/${p.id}`, { [key]: parentId, base_version: p.version });
     // link the two parents as a couple if both are now known
     if (otherParent) {
       const [h, w] = male ? [parentId, otherParent] : [otherParent, parentId];
@@ -1394,8 +1415,10 @@ function openMarriageForm(m) {
   $("[data-cancel]", el).addEventListener("click", close);
   $("[data-save]", el).addEventListener("click", async () => {
     const data = Object.fromEntries(new FormData($("#mf", el)));
+    const send = Object.fromEntries(Object.entries(data).filter(([k, v]) => !sameValue(v, m[k])));
+    if (!Object.keys(send).length) return close();
     try {
-      await api("PUT", `/api/marriages/${m.id}`, data);
+      if (!(await saveWithConflicts("PUT", `/api/marriages/${m.id}`, { ...send, base_version: m.version }))) return;
       close();
       toast("ذخیره شد");
       await loadTree();
@@ -1435,7 +1458,7 @@ function openMoveClan(p) {
 async function deletePerson(p) {
   if (!confirm(`«${fullName(p)}» از شجره‌نامه حذف شود؟ ارتباط فرزندان و ازدواج‌های او نیز حذف می‌شود.`)) return;
   try {
-    await api("DELETE", `/api/people/${p.id}`);
+    if (!(await saveWithConflicts("DELETE", `/api/people/${p.id}?base_version=${p.version ?? ""}`))) return;
     S.selectedId = null;
     toast("حذف شد");
     await loadTree();
@@ -1801,6 +1824,109 @@ async function openAdmin(tab = "users") {
 }
 
 // ---------------------------------------------------------------------------
+// history (version control)
+
+const ACTION_FA = { create: "ایجاد", update: "ویرایش", delete: "حذف", restore: "بازیابی" };
+const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id"];
+
+const when = (at) => toFa(new Date(`${String(at).replace(" ", "T")}Z`).toLocaleString("fa-IR", { dateStyle: "medium", timeStyle: "short" }));
+
+/** A person's versions, newest first, with what changed and a way back to any of them. */
+async function loadPersonHistory(p, box) {
+  let rows;
+  try {
+    ({ history: rows } = await api("GET", `/api/people/${p.id}/history`));
+  } catch (e) {
+    box.textContent = e instanceof OfflineError ? "تاریخچه فقط به‌صورت آنلاین در دسترس است." : e.message;
+    return;
+  }
+  if (!box.isConnected) return;
+  const editor = canEditPerson(p.id) && !S.offline;
+  box.className = "history";
+  box.innerHTML = rows
+    .map((h, i) => {
+      const prev = rows[i + 1]?.data;
+      const fields = h.action === "update" ? h.changed : [];
+      return `<div class="hrow" data-i="${i}">
+        <div class="hhead"><b>نسخهٔ ${toFa(h.version)}</b> · ${ACTION_FA[h.action] || h.action}${h.user_name ? ` · ${esc(h.user_name)}` : ""} <span class="muted">${when(h.at)}</span></div>
+        ${
+          fields.length
+            ? `<ul class="hchanges">${fields
+                .map((f) => `<li>${FIELD_FA[f] || f}: <span class="muted">${esc(showValue(f, prev?.[f]))}</span> ← <b>${esc(showValue(f, h.data[f]))}</b></li>`)
+                .join("")}</ul>`
+            : ""
+        }
+        ${editor && i > 0 && h.action !== "delete" ? `<button class="btn small" data-revert="${i}">بازگرداندن به این نسخه</button>` : ""}
+      </div>`;
+    })
+    .join("") || `<p class="muted">سابقه‌ای ثبت نشده است.</p>`;
+  $$("[data-revert]", box).forEach((b) =>
+    b.addEventListener("click", async () => {
+      const h = rows[Number(b.dataset.revert)];
+      if (!confirm(`«${fullName(p)}» به نسخهٔ ${toFa(h.version)} بازگردانده شود؟ (یک نسخهٔ تازه ساخته می‌شود و تاریخچه حفظ می‌شود)`)) return;
+      const data = Object.fromEntries(PERSON_FIELDS.filter((f) => !sameValue(h.data[f], p[f])).map((f) => [f, h.data[f]]));
+      try {
+        if (!(await saveWithConflicts("PUT", `/api/people/${p.id}`, { ...data, base_version: p.version }))) return;
+        toast(`به نسخهٔ ${toFa(h.version)} بازگردانده شد`);
+        await loadTree();
+      } catch (e) {
+        toast(e.message, true);
+      }
+    }),
+  );
+}
+
+/** Recent changes across the tree (what this user may see); admins can restore deleted people. */
+async function openRecentChanges() {
+  let data;
+  try {
+    data = await api("GET", "/api/history");
+  } catch (e) {
+    return toast(e instanceof OfflineError ? "فهرست تغییرات فقط به‌صورت آنلاین در دسترس است." : e.message, true);
+  }
+  const name = (h) => {
+    if (h.entity === "person") return `${h.data.first_name} ${h.data.last_name || ""}`.trim();
+    return `ازدواج ${showValue("husband_id", h.data.husband_id)} و ${showValue("wife_id", h.data.wife_id)}`;
+  };
+  const { el, close } = modal({
+    title: "آخرین تغییرات",
+    wide: true,
+    body: `<div class="table-wrap"><table class="users changes">
+      <thead><tr><th>زمان</th><th>چه کسی</th><th>تغییر</th><th>مورد</th><th></th></tr></thead>
+      <tbody>${data.history
+        .map(
+          (h) => `<tr>
+          <td class="muted">${when(h.at)}</td><td>${esc(h.user_name || "—")}</td>
+          <td>${ACTION_FA[h.action] || h.action}${h.changed?.length ? ` <span class="muted">(${h.changed.map((f) => FIELD_FA[f] || f).join("، ")})</span>` : ""}</td>
+          <td>${h.entity === "person" && person(h.entity_id) ? `<button class="chip ${h.data.gender}" data-goto="${h.entity_id}">${esc(name(h))}</button>` : esc(name(h))}</td>
+          <td>${h.deleted && h.action === "delete" && isAdmin() && !S.offline ? `<button class="btn small" data-restore="${h.entity_id}">بازیابی</button>` : ""}</td>
+        </tr>`,
+        )
+        .join("")}</tbody></table></div>
+      ${data.history.length ? "" : `<p class="muted">تغییری ثبت نشده است.</p>`}`,
+  });
+  $$("[data-goto]", el).forEach((b) =>
+    b.addEventListener("click", () => {
+      close();
+      selectPerson(Number(b.dataset.goto));
+    }),
+  );
+  $$("[data-restore]", el).forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        const res = await api("POST", `/api/people/${b.dataset.restore}/restore`, {});
+        close();
+        toast(`بازیابی شد${res.marriages ? ` (همراه با ${toFa(res.marriages)} ازدواج)` : ""}`);
+        await loadTree();
+        selectPerson(Number(b.dataset.restore));
+      } catch (e) {
+        toast(e.message, true);
+      }
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // offline
 
 function editOffline(method, path, data) {
@@ -1810,7 +1936,216 @@ function editOffline(method, path, data) {
   const { ops, response } = queueEdit(local.ops(S.user.id), base, method, path, data);
   if (!local.setOps(S.user.id, ops)) throw new Error("حافظهٔ مرورگر پر است؛ تغییرات را در فایل ذخیره کنید");
   updateNetChip();
+  // online but earlier edits are still queued (e.g. waiting on a conflict): try to send now
+  if (!S.offline) setTimeout(() => autoSync(), 0);
   return response;
+}
+
+// ---------------------------------------------------------------------------
+// version control: automatic sync and conflict resolution
+
+const FIELD_FA = {
+  first_name: "نام",
+  last_name: "نام خانوادگی",
+  nickname: "لقب",
+  gender: "جنسیت",
+  birth_date: "تاریخ تولد",
+  death_date: "تاریخ وفات",
+  is_deceased: "درگذشته",
+  birth_place: "محل تولد",
+  photo_url: "عکس",
+  notes: "یادداشت",
+  father_id: "پدر",
+  mother_id: "مادر",
+  clan_id: "طایفه",
+  husband_id: "شوهر",
+  wife_id: "همسر",
+  status: "وضعیت",
+  marriage_date: "تاریخ ازدواج",
+  end_date: "تاریخ پایان",
+};
+
+/** Field values equal for editing purposes ("" / null, booleans as 0/1, numbers as text). */
+function sameValue(a, b) {
+  const n = (v) => (v === true ? "1" : v === false ? "0" : v == null ? "" : String(v));
+  return n(a) === n(b);
+}
+
+function showValue(field, v) {
+  if (v == null || v === "") return "—";
+  if (["father_id", "mother_id", "husband_id", "wife_id"].includes(field)) return person(Number(v)) ? fullName(person(Number(v))) : `#${toFa(v)}`;
+  if (field === "clan_id") return clanName(Number(v));
+  if (field === "gender") return v === "male" ? "مرد" : "زن";
+  if (field === "is_deceased") return Number(v) ? "بله" : "خیر";
+  if (field === "status") return STATUS_FA[v] || v;
+  return toFa(String(v));
+}
+
+function opTarget(op, conflict) {
+  const cur = conflict?.current;
+  if (op.type.endsWith("Person")) return fullName(person(op.id) || cur || op.data) || "؟";
+  const m = cur || S.marriages.find((x) => x.id === op.id) || op.data || {};
+  return `${fullName(person(Number(m.husband_id)))} و ${fullName(person(Number(m.wife_id)))}`;
+}
+
+/**
+ * Show what needs the user's decision and resolve to their choices, or null if they close it.
+ * entries: {status:'conflict'|'failed'|'waiting', op, conflict?, error?, gone?}
+ */
+function conflictDialog(entries, { title = "تعارض در همگام‌سازی", offline = true } = {}) {
+  return new Promise((resolve) => {
+    const body = entries
+      .map((e, i) => {
+        const what = e.op.type.endsWith("Person")
+          ? `${({ createPerson: "افزودن", updatePerson: "ویرایش", deletePerson: "حذف" })[e.op.type]} ${opTarget(e.op, e.conflict)}`
+          : `${describeOp(e.op, () => "")} — ${opTarget(e.op, e.conflict)}`;
+        if (e.status === "conflict" && e.conflict.delete) {
+          return `<div class="conflict" data-i="${i}"><h4>⚠ ${esc(what)}</h4>
+            <p>این مورد پس از آخرین بارگذاری شما روی سرور تغییر کرده است.</p>
+            <label class="check"><input type="radio" name="c${i}" value="apply" checked> با این حال حذف شود</label>
+            <label class="check"><input type="radio" name="c${i}" value="drop"> حذف نشود</label></div>`;
+        }
+        if (e.status === "conflict") {
+          return `<div class="conflict" data-i="${i}"><h4>⚠ ${esc(what)}</h4>
+            <p class="hint">این فیلدها را کس دیگری هم پس از آخرین بارگذاری شما تغییر داده است. برای هر کدام یکی را انتخاب کنید:</p>
+            <table class="users diff"><thead><tr><th>فیلد</th><th>قبلاً</th><th>روی سرور</th><th>نسخهٔ شما</th></tr></thead><tbody>
+            ${e.conflict.fields
+              .map(
+                (f) => `<tr><td>${FIELD_FA[f.field] || f.field}</td><td class="muted">${esc(showValue(f.field, f.base))}</td>
+                  <td><label class="check"><input type="radio" name="c${i}-${f.field}" value="server"> ${esc(showValue(f.field, f.server))}</label></td>
+                  <td><label class="check"><input type="radio" name="c${i}-${f.field}" value="mine" checked> ${esc(showValue(f.field, f.mine))}</label></td></tr>`,
+              )
+              .join("")}
+            </tbody></table></div>`;
+        }
+        if (e.status === "waiting") return `<div class="conflict waiting" data-i="${i}"><h4>⏳ ${esc(what)}</h4><p class="muted">${esc(e.error)}</p></div>`;
+        return `<div class="conflict failed" data-i="${i}"><h4>✖ ${esc(what)}</h4><p class="error">${esc(e.error)}</p>
+          ${
+            e.gone
+              ? `<p class="muted">این مورد روی سرور حذف شده است؛ این تغییر کنار گذاشته می‌شود.</p>`
+              : `<label class="check"><input type="radio" name="c${i}" value="drop" checked> کنار گذاشتن این تغییر</label>
+                 ${offline ? `<label class="check"><input type="radio" name="c${i}" value="keep"> نگه داشتن در صف (برای بعد)</label>` : ""}`
+          }</div>`;
+      })
+      .join("");
+    const { el, close } = modal({
+      title,
+      wide: true,
+      body: `<p>برخی تغییرات به‌خاطر تعارض یا خطا ثبت نشدند و باید بررسی شوند. بقیهٔ تغییرات ثبت شده‌اند.</p>${body}`,
+      foot: `${offline ? `<button class="btn" data-file>💾 ذخیرهٔ تغییرات در فایل</button>` : ""}<span class="spacer"></span><button class="btn" data-later>${offline ? "بعداً" : "انصراف"}</button><button class="btn primary" data-apply>اعمال و ثبت</button>`,
+      onClose: () => finish(null), // Esc / ✕ / backdrop count as "later"
+    });
+    let answered = false;
+    const finish = (v) => {
+      if (answered) return;
+      answered = true;
+      close();
+      resolve(v);
+    };
+    $("[data-later]", el).addEventListener("click", () => finish(null));
+    $("[data-file]", el)?.addEventListener("click", () => saveOpsFile());
+    $("[data-apply]", el).addEventListener("click", () =>
+      finish(
+        entries.map((e, i) => {
+          if (e.status === "waiting") return { action: "keep" };
+          if (e.status === "conflict" && !e.conflict.delete) {
+            const fields = Object.fromEntries(e.conflict.fields.map((f) => [f.field, $(`[name="c${i}-${f.field}"]:checked`, el)?.value || "mine"]));
+            return { action: "apply", fields };
+          }
+          if (e.gone) return { action: "drop" };
+          return { action: $(`[name="c${i}"]:checked`, el)?.value || "drop" };
+        }),
+      ),
+    );
+  });
+}
+
+/** Turn a decision into the op to send again (null = drop it). */
+function resolvedOp(entry, decision) {
+  const op = { ...entry.op, data: entry.op.data ? { ...entry.op.data } : undefined };
+  if (decision.action === "drop") return null;
+  if (decision.action === "keep") return op;
+  if (entry.status === "conflict") {
+    // based on the server's version now; fields where the server's value was chosen are left out
+    op.base_version = entry.conflict.version;
+    for (const [f, pick] of Object.entries(decision.fields || {})) if (pick === "server" && op.data) delete op.data[f];
+  }
+  return op;
+}
+
+let syncing = false;
+
+/**
+ * Replay edits, asking the user about conflicts and errors and replaying their decisions,
+ * until everything went through or the user postpones. `queue`: keep the device's offline
+ * queue in step (for edits made on this device).
+ */
+async function syncLoop(ops, { queue = false } = {}) {
+  const store = (list) => queue && (local.setOps(S.user.id, list), updateNetChip());
+  let done = 0;
+  for (let round = 0; round < 20 && ops.length; round++) {
+    const res = await replay(ops, apiFetch);
+    done += res.done;
+    ops = res.remaining;
+    store(ops);
+    if (!res.pending.length || res.pending.every((p) => p.status === "waiting")) break;
+    await loadTree();
+    const decisions = await conflictDialog(res.pending, { offline: queue });
+    if (!decisions) return { done, remaining: ops, postponed: true };
+    ops = res.pending.map((p, i) => resolvedOp(p, decisions[i])).filter(Boolean);
+    store(ops);
+  }
+  return { done, remaining: ops };
+}
+
+/** Send queued offline edits; merges silently, asks the user only about real conflicts. */
+async function autoSync() {
+  if (syncing || S.offline || !S.user || !local.ops(S.user.id).length) return;
+  syncing = true;
+  try {
+    const res = await syncLoop(local.ops(S.user.id), { queue: true });
+    await loadTree();
+    if (res.postponed) toast("تغییرات حل‌نشده در صف ماندند؛ از «☁️ آفلاین» دوباره بررسی کنید", true);
+    else if (res.done) toast(`${toFa(res.done)} تغییر آفلاین خودکار روی سرور ثبت شد`);
+  } catch (e) {
+    if (e instanceof OfflineError) goOffline();
+    else toast(e.message, true);
+  } finally {
+    syncing = false;
+  }
+}
+
+function saveOpsFile(ops = local.ops(S.user.id)) {
+  download(`familytree-changes-${stamp()}.json`, {
+    format: CHANGES_FORMAT,
+    created_at: new Date().toISOString(),
+    user: S.user.username,
+    base_saved_at: local.snapshot(S.user.id)?.saved_at,
+    ops,
+  });
+}
+
+/**
+ * Save an edit online; if it conflicts with a newer version on the server, let the user pick
+ * per field and save again. Returns the server's response, or null if the user gave up.
+ */
+async function saveWithConflicts(method, path, data) {
+  try {
+    return await api(method, path, data);
+  } catch (e) {
+    if (e.status !== 409 || !e.data?.conflict) throw e;
+    const id = Number(path.match(/\/(\d+)/)[1]);
+    const type = `${method === "DELETE" ? "delete" : "update"}${path.includes("/people/") ? "Person" : "Marriage"}`;
+    const entry = { status: "conflict", op: { type, id, data: data && { ...data } }, conflict: e.data.conflict };
+    if (entry.op.data) delete entry.op.data.base_version;
+    const [decision] = (await conflictDialog([entry], { title: "تعارض در ذخیره", offline: false })) || [];
+    if (!decision) return null;
+    const op = resolvedOp(entry, decision);
+    if (!op) return null;
+    const base = `${path.split("?")[0]}`;
+    if (method === "DELETE") return saveWithConflicts("DELETE", `${base}?base_version=${op.base_version}`);
+    return saveWithConflicts(method, base, { ...(op.data || {}), base_version: op.base_version });
+  }
 }
 
 function goOffline() {
@@ -1827,8 +2162,11 @@ async function checkOnline() {
     S.offline = false;
     updateNetChip();
     const n = local.ops(S.user.id).length;
-    toast(n ? `اتصال برقرار شد؛ ${toFa(n)} تغییر آمادهٔ ارسال است` : "اتصال برقرار شد");
-    loadTree();
+    if (n) await autoSync();
+    else {
+      toast("اتصال برقرار شد");
+      loadTree();
+    }
   } catch {
     // still offline
   }
@@ -1859,8 +2197,9 @@ function stamp() {
 }
 
 function showReplayResult(res, el) {
-  const lines = res.failed.map((f) => `<li>${esc(describeOp(f.op, (id) => fullName(person(id))))}: <span class="error">${esc(f.error)}</span></li>`).join("");
-  $("[data-result]", el).innerHTML = `<div class="result-box"><b>${toFa(res.done)} تغییر روی سرور ثبت شد.</b>${res.failed.length ? `<div class="error">${toFa(res.failed.length)} تغییر ثبت نشد:</div><ul>${lines}</ul>` : ""}</div>`;
+  $("[data-result]", el).innerHTML = `<div class="result-box"><b>${toFa(res.done)} تغییر روی سرور ثبت شد.</b>${
+    res.remaining.length ? `<div class="error">${toFa(res.remaining.length)} تغییر حل‌نشده ماند و در فایل جداگانه ذخیره شد.</div>` : ""
+  }</div>`;
 }
 
 function openSync() {
@@ -1886,12 +2225,10 @@ function openSync() {
         <label class="btn ${S.offline ? "disabled" : ""}">⬆ بارگذاری فایل تغییرات روی سرور<input type="file" accept="application/json,.json" hidden data-upload ${S.offline || !canEdit() ? "disabled" : ""}></label>
         <button class="btn" data-full>⬇ دریافت نسخهٔ کامل (JSON)</button>
       </div>
-      <p class="hint">«فایل تغییرات» فقط کارهایی را دارد که آفلاین انجام داده‌اید؛ بعداً روی سرور اصلی بارگذاری می‌شود و تغییرات به ترتیب ثبت می‌شوند. اگر کسی در این فاصله همان شخص را ویرایش کرده باشد، ویرایش شما جایگزین می‌شود.</p>
+      <p class="hint">«فایل تغییرات» فقط کارهایی را دارد که آفلاین انجام داده‌اید؛ بعداً روی سرور اصلی بارگذاری می‌شود و تغییرات به ترتیب ثبت می‌شوند. اگر کسی در این فاصله همان شخص را ویرایش کرده باشد، تغییرهای فیلدهای متفاوت خودکار ادغام می‌شوند و برای فیلدهای مشترک از شما پرسیده می‌شود.</p>
       <div data-result></div>`,
   });
-  $("[data-save-ops]", el).addEventListener("click", () =>
-    download(`familytree-changes-${stamp()}.json`, { format: CHANGES_FORMAT, created_at: new Date().toISOString(), user: S.user.username, base_saved_at: snap?.saved_at, ops }),
-  );
+  $("[data-save-ops]", el).addEventListener("click", () => saveOpsFile());
   $("[data-full]", el).addEventListener("click", () =>
     download(`familytree-${stamp()}.json`, { format: "familytree/v1", exported_at: new Date().toISOString(), people: S.people, marriages: S.marriages }),
   );
@@ -1902,19 +2239,9 @@ function openSync() {
     updateNetChip();
     await loadTree();
   });
-  $("[data-send]", el).addEventListener("click", async (e) => {
-    e.target.disabled = true;
-    try {
-      const res = await replay(local.ops(S.user.id), apiFetch);
-      local.setOps(S.user.id, res.remaining);
-      updateNetChip();
-      showReplayResult(res, el);
-      await loadTree();
-    } catch (ex) {
-      if (ex instanceof OfflineError) goOffline();
-      toast(ex.message, true);
-      e.target.disabled = false;
-    }
+  $("[data-send]", el).addEventListener("click", async () => {
+    close();
+    await autoSync();
   });
   $("[data-upload]", el).addEventListener("change", async (e) => {
     const file = e.target.files[0];
@@ -1923,9 +2250,9 @@ function openSync() {
       const data = JSON.parse(await file.text());
       if (data.format !== CHANGES_FORMAT || !Array.isArray(data.ops)) throw new Error("این فایل، فایل تغییرات شجره‌نامه نیست");
       if (!confirm(`${toFa(data.ops.length)} تغییر${data.user ? ` از «${data.user}»` : ""} روی سرور ثبت شود؟`)) return;
-      const res = await replay(data.ops, apiFetch);
+      const res = await syncLoop(data.ops);
       showReplayResult(res, el);
-      if (res.remaining.length) download(`familytree-changes-failed-${stamp()}.json`, { ...data, ops: res.remaining });
+      if (res.remaining.length) download(`familytree-changes-remaining-${stamp()}.json`, { ...data, ops: res.remaining });
       await loadTree();
     } catch (ex) {
       toast(ex.message, true);

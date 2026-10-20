@@ -28,6 +28,7 @@ export interface Person {
   father_id: number | null;
   mother_id: number | null;
   clan_id: number | null;
+  version?: number;
 }
 
 export interface Marriage {
@@ -38,12 +39,15 @@ export interface Marriage {
   marriage_date: string;
   end_date: string;
   notes: string;
+  version?: number;
 }
 
 export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** extra fields for the JSON error body (e.g. conflict details) */
+    public extra?: Record<string, unknown>,
   ) {
     super(message);
   }

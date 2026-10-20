@@ -166,9 +166,13 @@ const ROUTES = [
 
 /** Is this API call a family-tree edit that can be queued offline? */
 export function editType(method, path) {
+  const [p, query = ""] = path.split("?");
   for (const [m, re, type] of ROUTES) {
-    const hit = method === m && path.match(re);
-    if (hit) return { type, id: hit[1] ? Number(hit[1]) : null };
+    const hit = method === m && p.match(re);
+    if (hit) {
+      const base = new URLSearchParams(query).get("base_version");
+      return { type, id: hit[1] ? Number(hit[1]) : null, base_version: base ? Number(base) : null };
+    }
   }
   return null;
 }
@@ -186,66 +190,96 @@ function nextTempId(ops) {
 export function queueEdit(ops, base, method, path, data = {}) {
   const e = editType(method, path);
   const op = { type: e.type, at: new Date().toISOString() };
+  // the version this edit started from (for conflict detection on replay)
+  const startedFrom = data?.base_version ?? e.base_version;
+  if (startedFrom) op.base_version = Number(startedFrom);
   if (e.type === "createPerson" || e.type === "createMarriage") {
     op.id = nextTempId(ops);
     if (data.spouse_of) op.spouseMarriageId = op.id + 1;
   } else op.id = e.id;
-  if (data && Object.keys(data).length) op.data = data;
+  if (data && Object.keys(data).length) {
+    const { base_version: _, ...rest } = data;
+    if (Object.keys(rest).length) op.data = rest;
+  }
   const next = [...ops, op];
   const cur = applyOps(base.people, base.marriages, ops);
   const result = applyOps(cur.people, cur.marriages, [op], { strict: true });
   let response = { ok: true };
-  if (e.type === "createPerson") response = { person: result.people.find((p) => p.id === op.id) };
+  if (e.type === "createPerson" || e.type === "updatePerson") response = { person: result.people.find((p) => p.id === op.id) };
   if (e.type === "createMarriage") response = { id: op.id };
   return { ops: next, response };
 }
 
+const entityOf = (type) => (type.endsWith("Person") ? "person" : "marriage");
+
 /**
- * Send queued edits to the server in order, mapping temporary ids to the real ones.
- * @returns {Promise<{done:number, failed:{op:any, error:string}[], remaining:any[]}>}
+ * Send queued edits to the server in order, mapping temporary ids to the real ones and
+ * carrying each record's version forward so the server can merge or detect conflicts.
+ * An edit that conflicts (or fails) holds back later edits of the same record.
+ * @returns {Promise<{done:number, pending:{op:any, status:'conflict'|'failed'|'waiting', conflict?:any, error?:string, gone?:boolean}[], remaining:any[]}>}
  */
 export async function replay(ops, api) {
   const map = new Map();
-  const failed = [];
+  const versions = new Map(); // "person:12" → version after our last successful edit
+  const blocked = new Set();
+  const pending = [];
   let done = 0;
   const real = (id) => {
     const v = map.has(id) ? map.get(id) : id;
-    if (isTemp(v)) throw new Error("به شخص یا ازدواجی اشاره دارد که ساخته نشد");
+    if (isTemp(v)) throw Object.assign(new Error("به شخص یا ازدواجی اشاره دارد که هنوز ساخته نشده"), { waiting: true });
     return v;
   };
   for (const op of ops) {
+    const key = `${entityOf(op.type)}:${map.get(op.id) ?? op.id}`;
+    if (blocked.has(key)) {
+      pending.push({ op, status: "waiting", error: "پس از حل مورد قبلیِ همین شخص یا ازدواج ارسال می‌شود" });
+      continue;
+    }
     try {
       const d = op.data ? { ...op.data } : {};
       for (const k of ["father_id", "mother_id", "husband_id", "wife_id"]) if (d[k] != null && d[k] !== "") d[k] = real(Number(d[k]));
+      const base = versions.get(key) ?? op.base_version ?? null;
+      const q = base ? `?base_version=${base}` : "";
       switch (op.type) {
         case "createPerson": {
           const spouse = d.spouse_of ? real(Number(d.spouse_of)) : null;
           delete d.spouse_of;
           const r = await api("POST", "/api/people", d);
           map.set(op.id, r.person.id);
+          versions.set(`person:${r.person.id}`, r.person.version);
           if (spouse) {
             const [h, w] = r.person.gender === "male" ? [r.person.id, spouse] : [spouse, r.person.id];
             const m = await api("POST", "/api/marriages", { husband_id: h, wife_id: w }).catch(() => null);
-            if (m) map.set(op.spouseMarriageId, m.id);
+            if (m) {
+              map.set(op.spouseMarriageId, m.id);
+              versions.set(`marriage:${m.id}`, m.version);
+            }
           }
           break;
         }
-        case "updatePerson":
-          await api("PUT", `/api/people/${real(op.id)}`, d);
+        case "updatePerson": {
+          const id = real(op.id);
+          const r = await api("PUT", `/api/people/${id}`, base ? { ...d, base_version: base } : d);
+          versions.set(`person:${id}`, r.person.version);
           break;
+        }
         case "deletePerson":
-          await api("DELETE", `/api/people/${real(op.id)}`);
+          await api("DELETE", `/api/people/${real(op.id)}${q}`);
           break;
         case "createMarriage": {
           const r = await api("POST", "/api/marriages", d);
           map.set(op.id, r.id);
+          versions.set(`marriage:${r.id}`, r.version);
           break;
         }
-        case "updateMarriage":
-          await api("PUT", `/api/marriages/${real(op.id)}`, d);
+        case "updateMarriage": {
+          const id = real(op.id);
+          const r = await api("PUT", `/api/marriages/${id}`, base ? { ...d, base_version: base } : d);
+          versions.set(`marriage:${id}`, r.version);
           break;
+        }
         case "deleteMarriage":
-          await api("DELETE", `/api/marriages/${real(op.id)}`);
+          await api("DELETE", `/api/marriages/${real(op.id)}${q}`);
           break;
         default:
           throw new Error("نوع تغییر ناشناخته است");
@@ -253,17 +287,22 @@ export async function replay(ops, api) {
       done++;
     } catch (e) {
       if (e instanceof OfflineError) throw e;
-      failed.push({ op, error: e.message });
+      blocked.add(key);
+      if (e.waiting) pending.push({ op, status: "waiting", error: e.message });
+      else if (e.status === 409 && e.data?.conflict) pending.push({ op, status: "conflict", conflict: e.data.conflict, error: e.message });
+      else pending.push({ op, status: "failed", error: e.message, gone: !!e.data?.gone });
     }
   }
-  // keep what failed, with ids that were created meanwhile rewritten to the real ones
+  // keep what didn't go through, with ids created meanwhile rewritten to the real ones
   const fix = (v) => (map.has(Number(v)) ? map.get(Number(v)) : v);
-  const remaining = failed.map(({ op }) => {
-    const o = { ...op, id: fix(op.id), data: op.data ? { ...op.data } : undefined };
+  for (const p of pending) {
+    const o = { ...p.op, id: fix(p.op.id), data: p.op.data ? { ...p.op.data } : undefined };
     if (o.data) for (const k of ["father_id", "mother_id", "husband_id", "wife_id", "spouse_of"]) if (o.data[k] != null) o.data[k] = fix(o.data[k]);
-    return o;
-  });
-  return { done, failed, remaining };
+    const v = versions.get(`${entityOf(o.type)}:${o.id}`);
+    if (v && p.status === "waiting") o.base_version = v;
+    p.op = o;
+  }
+  return { done, pending, remaining: pending.map((p) => p.op) };
 }
 
 export function describeOp(op, nameOf) {

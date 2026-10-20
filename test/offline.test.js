@@ -51,7 +51,38 @@ test("replay maps temporary ids to the ids the server returns", async () => {
   };
   const res = await replay(ops, api);
   assert.equal(res.done, 2);
-  assert.equal(res.failed.length, 1);
+  assert.equal(res.pending.length, 1);
+  assert.equal(res.pending[0].status, "failed");
   assert.equal(res.remaining.length, 1);
   assert.equal(calls[1][2].father_id, 50); // رضا's father is the new real id of حسن
+});
+
+test("replay carries versions forward and holds edits behind a conflict", async () => {
+  const ops = [
+    { type: "updatePerson", id: 1, base_version: 3, data: { nickname: "a" } },
+    { type: "updatePerson", id: 1, base_version: 3, data: { notes: "b" } },
+    { type: "updatePerson", id: 2, base_version: 5, data: { nickname: "c" } },
+    { type: "updatePerson", id: 2, base_version: 5, data: { notes: "d" } },
+  ];
+  const sent = [];
+  const api = async (method, path, data) => {
+    sent.push([path, data.base_version]);
+    if (path === "/api/people/2") {
+      throw Object.assign(new Error("conflict"), { status: 409, data: { conflict: { entity: "person", id: 2, version: 7, fields: [] } } });
+    }
+    return { person: { id: 1, version: data.base_version + 1 } };
+  };
+  const res = await replay(ops, api);
+  assert.deepEqual(sent, [["/api/people/1", 3], ["/api/people/1", 4], ["/api/people/2", 5]]);
+  assert.equal(res.done, 2);
+  assert.deepEqual(res.pending.map((p) => p.status), ["conflict", "waiting"]);
+});
+
+test("queued edits keep the version they started from", () => {
+  const base2 = { people: [{ id: 1, first_name: "علی", gender: "male", version: 4 }], marriages: [] };
+  const { ops } = queueEdit([], base2, "PUT", "/api/people/1", { nickname: "x", base_version: 4 });
+  assert.equal(ops[0].base_version, 4);
+  assert.deepEqual(ops[0].data, { nickname: "x" });
+  const del = queueEdit(ops, base2, "DELETE", "/api/people/1?base_version=4");
+  assert.equal(del.ops[1].base_version, 4);
 });

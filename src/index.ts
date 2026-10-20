@@ -12,6 +12,7 @@ import {
 import { HttpError, type Env, type Marriage, type Person, type Role, type User } from "./types";
 // shared with the browser, so both sides agree on generations and branches
 import { canAddInClan, permissions } from "../public/js/generations.js";
+import { baselineStmts, historyStmt, merge, recordAt, same, type Entity } from "./versions";
 
 type Ctx = { env: Env; request: Request; url: URL; user: User | null; params: string[] };
 type Handler = (ctx: Ctx) => Promise<Response>;
@@ -260,7 +261,8 @@ const updateSettings: Handler = async ({ env, request, user }) => {
 // family tree
 
 const PERSON_COLS =
-  "id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id";
+  "id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, version";
+const MARRIAGE_COLS = "id, husband_id, wife_id, status, marriage_date, end_date, notes, version";
 
 function isAncestor(people: Map<number, Person>, ancestorId: number, personId: number): boolean {
   const stack = [personId];
@@ -353,7 +355,7 @@ async function grantsOf(env: Env, user: User): Promise<Grant[]> {
 async function loadScoped(env: Env, user: User) {
   const [pr, mr, cr] = await env.DB.batch([
     env.DB.prepare(`SELECT ${PERSON_COLS} FROM people ORDER BY id`),
-    env.DB.prepare("SELECT id, husband_id, wife_id, status, marriage_date, end_date, notes FROM marriages ORDER BY id"),
+    env.DB.prepare(`SELECT ${MARRIAGE_COLS} FROM marriages ORDER BY id`),
     env.DB.prepare("SELECT id, name, description FROM clans ORDER BY id"),
   ]);
   const people = pr.results as unknown as Person[];
@@ -405,6 +407,60 @@ const getTree: Handler = async ({ env, user }) => {
   });
 };
 
+/** base_version from the body or the query string (DELETE has no body). */
+function baseVersionOf(b: Record<string, unknown> | null, url: URL): number | null {
+  const v = b?.base_version ?? url.searchParams.get("base_version");
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) throw new HttpError(400, "نسخهٔ نامعتبر");
+  return n;
+}
+
+const CONFLICT_MSG = "این مورد پس از آخرین بارگذاری شما تغییر کرده و تغییرات شما با آن تداخل دارد";
+
+/** Three-way merge of an edit against the current record; throws 409 on overlapping changes. */
+async function mergeEdit<T extends { id: number; version?: number }>(
+  env: Env,
+  entity: Entity,
+  current: T,
+  baseVersion: number | null,
+  propose: (base: T) => T,
+) {
+  let base: T = current;
+  if (baseVersion != null && baseVersion !== current.version) {
+    const old = await recordAt(env, entity, current.id, baseVersion);
+    // an unknown base version: compare against the current record, so every change of
+    // the edit that differs from it counts as overlapping
+    base = (old ? { ...current, ...old } : null) as T;
+  }
+  if (!base) {
+    const proposed = propose(current);
+    const r = merge(entity, current as never, current as never, proposed as never);
+    throw new HttpError(409, CONFLICT_MSG, {
+      conflict: { entity, id: current.id, version: current.version, base_version: baseVersion, fields: r.mine.map((f) => ({ field: f, base: null, server: (current as never)[f] ?? null, mine: (proposed as never)[f] ?? null })), current },
+    });
+  }
+  const proposed = propose(base);
+  const r = merge(entity, base as never, current as never, proposed as never);
+  if (r.conflicts.length) {
+    throw new HttpError(409, CONFLICT_MSG, {
+      conflict: { entity, id: current.id, version: current.version, base_version: baseVersion, fields: r.conflicts, current },
+    });
+  }
+  // only what actually differs from the server's record becomes a new version
+  const changed = r.mine.filter((f) => !same(r.merged[f], (current as never)[f]));
+  return { merged: r.merged as unknown as T, changed };
+}
+
+/** A delete may only go ahead if the record is still the version the user saw. */
+function checkDeleteVersion(entity: Entity, current: { id: number; version?: number }, baseVersion: number | null) {
+  if (baseVersion != null && baseVersion !== current.version) {
+    throw new HttpError(409, "این مورد پس از آخرین بارگذاری شما تغییر کرده است؛ پیش از حذف آن را بررسی کنید", {
+      conflict: { entity, id: current.id, version: current.version, base_version: baseVersion, fields: [], current, delete: true },
+    });
+  }
+}
+
 const createPerson: Handler = async ({ env, request, user }) => {
   const me = require(user, "viewer");
   const b = await body(request);
@@ -422,32 +478,41 @@ const createPerson: Handler = async ({ env, request, user }) => {
     throw new HttpError(403, "فقط می‌توانید فرزند یا همسرِ افرادی را که اجازهٔ ویرایششان را دارید اضافه کنید");
   }
   checkParents(people, p);
-  const row = await env.DB.prepare(
-    `INSERT INTO people (first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${PERSON_COLS}`,
-  )
-    .bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id)
-    .first<Person>();
+  const stmts = [
+    env.DB.prepare(
+      `INSERT INTO people (first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${PERSON_COLS}`,
+    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id),
+    historyStmt(env, "person", "create", me, [], "id = last_insert_rowid()", []),
+  ];
+  const [res] = await env.DB.batch(stmts);
+  const row = res.results[0] as unknown as Person;
 
   // Optional: link the new person as spouse of an existing person in the same request.
   if (spouseOfId && row) {
     const other = people.get(spouseOfId);
     if (other && other.gender !== row.gender) {
       const [h, w] = row.gender === "male" ? [row.id, other.id] : [other.id, row.id];
-      await env.DB.prepare("INSERT INTO marriages (husband_id, wife_id) VALUES (?, ?) ON CONFLICT DO NOTHING").bind(h, w).run();
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO marriages (husband_id, wife_id) VALUES (?, ?) ON CONFLICT DO NOTHING").bind(h, w),
+        historyStmt(env, "marriage", "create", me, [], "id = last_insert_rowid() AND husband_id = ? AND wife_id = ?", [h, w]),
+      ]);
     }
   }
   return json({ person: row }, 201);
 };
 
-const updatePerson: Handler = async ({ env, request, user, params }) => {
+const updatePerson: Handler = async ({ env, request, url, user, params }) => {
   const me = require(user, "viewer");
   const id = optId(params[0])!;
+  const b = await body(request);
   const { people, clans, perms } = await loadScoped(env, me);
   const existing = people.get(id);
-  if (!existing || !canSee(perms, id)) throw new HttpError(404, "شخص یافت نشد");
+  if (!existing || !canSee(perms, id)) throw new HttpError(404, "شخص یافت نشد", { gone: true });
   if (!canChange(perms, id)) throw new HttpError(403, NOT_YOURS);
-  const p = parsePerson(await body(request), existing);
+  const { merged, changed } = await mergeEdit(env, "person", existing, baseVersionOf(b, url), (base) => ({ ...base, ...parsePerson(b, base) }));
+  if (!changed.length) return json({ person: existing, unchanged: true });
+  const p = parsePerson(merged as unknown as Record<string, unknown>);
   // hidden parents stay as they are; new ones must be visible
   if (p.father_id !== existing.father_id) requireVisible(perms, [p.father_id]);
   if (p.mother_id !== existing.mother_id) requireVisible(perms, [p.mother_id]);
@@ -464,14 +529,15 @@ const updatePerson: Handler = async ({ env, request, user, params }) => {
     const m = await env.DB.prepare("SELECT 1 FROM marriages WHERE husband_id = ? OR wife_id = ? LIMIT 1").bind(id, id).first();
     if (m) throw new HttpError(400, "این شخص ازدواج ثبت‌شده دارد؛ ابتدا ازدواج را حذف کنید");
   }
-  const row = await env.DB.prepare(
-    `UPDATE people SET first_name = ?, last_name = ?, nickname = ?, gender = ?, birth_date = ?, death_date = ?, is_deceased = ?,
-       birth_place = ?, photo_url = ?, notes = ?, father_id = ?, mother_id = ?, clan_id = ?, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ? RETURNING ${PERSON_COLS}`,
-  )
-    .bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, id)
-    .first<Person>();
-  return json({ person: row });
+  const [res] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE people SET first_name = ?, last_name = ?, nickname = ?, gender = ?, birth_date = ?, death_date = ?, is_deceased = ?,
+         birth_place = ?, photo_url = ?, notes = ?, father_id = ?, mother_id = ?, clan_id = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? RETURNING ${PERSON_COLS}`,
+    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, id),
+    historyStmt(env, "person", "update", me, changed, "id = ?", [id]),
+  ]);
+  return json({ person: res.results[0], merged: changed.length });
 };
 
 /** Move a person — optionally with their ancestors or descendants — to another clan. */
@@ -498,16 +564,23 @@ const movePerson: Handler = async ({ env, request, user, params }) => {
   // only people the user may edit, and only people in the person's current clan
   const from = people.get(id)!.clan_id;
   const move = [...ids].filter((x) => canChange(perms, x) && people.get(x)!.clan_id === from);
-  await env.DB.batch(move.map((x) => env.DB.prepare("UPDATE people SET clan_id = ? WHERE id = ?").bind(clanId, x)));
+  await env.DB.batch(
+    move.flatMap((x) => [
+      env.DB.prepare("UPDATE people SET clan_id = ?, version = version + 1 WHERE id = ?").bind(clanId, x),
+      historyStmt(env, "person", "update", me, ["clan_id"], "id = ?", [x]),
+    ]),
+  );
   return json({ ok: true, moved: move.length });
 };
 
-const deletePerson: Handler = async ({ env, user, params }) => {
+const deletePerson: Handler = async ({ env, url, user, params }) => {
   const me = require(user, "viewer");
   const id = optId(params[0])!;
-  const { perms } = await loadScoped(env, me);
-  if (!canSee(perms, id)) throw new HttpError(404, "شخص یافت نشد");
+  const { people, list, marriages, perms } = await loadScoped(env, me);
+  const existing = people.get(id);
+  if (!existing || !canSee(perms, id)) throw new HttpError(404, "شخص یافت نشد", { gone: true });
   if (!canDelete(perms, id)) throw new HttpError(403, "اجازهٔ حذف این شخص را ندارید");
+  checkDeleteVersion("person", existing, baseVersionOf(null, url));
   // deleting a branch root would silently change what a grant covers
   const used = await env.DB.prepare(
     `SELECT COALESCE(u.display_name, u.username, ag.name) AS who FROM grants g
@@ -517,13 +590,69 @@ const deletePerson: Handler = async ({ env, user, params }) => {
     .bind(id)
     .first<{ who: string }>();
   if (used) throw new HttpError(400, `این شخص مبنای یک دسترسی («${used.who}») است؛ ابتدا آن دسترسی را تغییر دهید`);
-  await env.DB.batch([
-    env.DB.prepare("UPDATE people SET father_id = NULL WHERE father_id = ?").bind(id),
-    env.DB.prepare("UPDATE people SET mother_id = NULL WHERE mother_id = ?").bind(id),
-    env.DB.prepare("DELETE FROM marriages WHERE husband_id = ? OR wife_id = ?").bind(id, id),
-    env.DB.prepare("DELETE FROM people WHERE id = ?").bind(id),
-  ]);
+  const stmts: D1PreparedStatement[] = [];
+  // children lose this parent: that is a new version of each child
+  for (const key of ["father_id", "mother_id"] as const) {
+    const kids = list.filter((c) => c[key] === id).map((c) => c.id);
+    if (!kids.length) continue;
+    stmts.push(env.DB.prepare(`UPDATE people SET ${key} = NULL, version = version + 1 WHERE ${key} = ?`).bind(id));
+    stmts.push(historyStmt(env, "person", "update", me, [key], `id IN (${kids.map(() => "?").join(",")})`, kids));
+  }
+  if (marriages.some((m) => m.husband_id === id || m.wife_id === id)) {
+    stmts.push(historyStmt(env, "marriage", "delete", me, [], "husband_id = ? OR wife_id = ?", [id, id], 1));
+    stmts.push(env.DB.prepare("DELETE FROM marriages WHERE husband_id = ? OR wife_id = ?").bind(id, id));
+  }
+  stmts.push(historyStmt(env, "person", "delete", me, [], "id = ?", [id], 1));
+  stmts.push(env.DB.prepare("DELETE FROM people WHERE id = ?").bind(id));
+  await env.DB.batch(stmts);
   return json({ ok: true });
+};
+
+/** Bring back a deleted person (and the marriages deleted with them) from history. */
+const restorePerson: Handler = async ({ env, user, params }) => {
+  const me = require(user, "admin");
+  const id = optId(params[0])!;
+  if (await env.DB.prepare("SELECT 1 FROM people WHERE id = ?").bind(id).first()) throw new HttpError(400, "این شخص حذف نشده است");
+  const last = await env.DB.prepare("SELECT version, data FROM history WHERE entity = 'person' AND entity_id = ? ORDER BY id DESC LIMIT 1")
+    .bind(id)
+    .first<{ version: number; data: string }>();
+  if (!last) throw new HttpError(404, "سابقه‌ای از این شخص نیست");
+  const d = JSON.parse(last.data);
+  const exists = async (pid: unknown) => !!pid && !!(await env.DB.prepare("SELECT 1 FROM people WHERE id = ?").bind(pid).first());
+  const clan = (await env.DB.prepare("SELECT id FROM clans WHERE id = ?").bind(d.clan_id).first<{ id: number }>())?.id
+    ?? (await env.DB.prepare("SELECT id FROM clans ORDER BY id LIMIT 1").first<{ id: number }>())?.id ?? 1;
+  const p = parsePerson({ ...d, father_id: (await exists(d.father_id)) ? d.father_id : null, mother_id: (await exists(d.mother_id)) ? d.mother_id : null, clan_id: clan });
+  const stmts: D1PreparedStatement[] = [
+    env.DB.prepare(
+      `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, last.version + 1),
+    historyStmt(env, "person", "restore", me, [], "id = ?", [id]),
+  ];
+  // marriages whose last record is a delete involving this person, if the spouse is still here
+  const { results } = await env.DB.prepare(
+    `SELECT h.entity_id, h.version, h.data FROM history h
+     WHERE h.entity = 'marriage' AND h.action = 'delete' AND h.id = (SELECT MAX(id) FROM history WHERE entity = 'marriage' AND entity_id = h.entity_id)
+       AND (json_extract(h.data, '$.husband_id') = ?1 OR json_extract(h.data, '$.wife_id') = ?1)`,
+  )
+    .bind(id)
+    .all<{ entity_id: number; version: number; data: string }>();
+  let marriagesBack = 0;
+  for (const r of results) {
+    const m = JSON.parse(r.data);
+    const other = m.husband_id === id ? m.wife_id : m.husband_id;
+    if (!(await exists(other))) continue;
+    if (await env.DB.prepare("SELECT 1 FROM marriages WHERE id = ? OR (husband_id = ? AND wife_id = ?)").bind(r.entity_id, m.husband_id, m.wife_id).first()) continue;
+    stmts.push(
+      env.DB.prepare("INSERT INTO marriages (id, husband_id, wife_id, status, marriage_date, end_date, notes, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(
+        r.entity_id, m.husband_id, m.wife_id, m.status || "married", m.marriage_date || "", m.end_date || "", m.notes || "", r.version + 1,
+      ),
+      historyStmt(env, "marriage", "restore", me, [], "id = ?", [r.entity_id]),
+    );
+    marriagesBack++;
+  }
+  await env.DB.batch(stmts);
+  return json({ ok: true, marriages: marriagesBack });
 };
 
 const MARRIAGE_STATUSES = ["married", "divorced", "widowed"];
@@ -564,44 +693,114 @@ const createMarriage: Handler = async ({ env, request, user }) => {
   const me = require(user, "viewer");
   const m = parseMarriage(await body(request));
   await checkSpouses(env, me, m);
-  const row = await env.DB.prepare(
-    `INSERT INTO marriages (husband_id, wife_id, status, marriage_date, end_date, notes) VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT DO NOTHING RETURNING id`,
-  )
-    .bind(m.husband_id, m.wife_id, m.status, m.marriage_date, m.end_date, m.notes)
-    .first<{ id: number }>();
+  const [res] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO marriages (husband_id, wife_id, status, marriage_date, end_date, notes) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING RETURNING id, version`,
+    ).bind(m.husband_id, m.wife_id, m.status, m.marriage_date, m.end_date, m.notes),
+    historyStmt(env, "marriage", "create", me, [], "id = last_insert_rowid() AND husband_id = ? AND wife_id = ?", [m.husband_id, m.wife_id]),
+  ]);
+  const row = res.results[0] as { id: number; version: number } | undefined;
   if (!row) throw new HttpError(409, "این ازدواج قبلاً ثبت شده است");
-  return json({ id: row.id }, 201);
+  return json({ id: row.id, version: row.version }, 201);
 };
 
-const updateMarriage: Handler = async ({ env, request, user, params }) => {
+const updateMarriage: Handler = async ({ env, request, url, user, params }) => {
   const me = require(user, "viewer");
   const id = optId(params[0])!;
-  const existing = await env.DB.prepare("SELECT * FROM marriages WHERE id = ?").bind(id).first<Marriage>();
-  if (!existing) throw new HttpError(404, "ازدواج یافت نشد");
-  const m = parseMarriage(await body(request), existing);
+  const b = await body(request);
+  const existing = await env.DB.prepare(`SELECT ${MARRIAGE_COLS} FROM marriages WHERE id = ?`).bind(id).first<Marriage>();
+  if (!existing) throw new HttpError(404, "ازدواج یافت نشد", { gone: true });
+  const { merged, changed } = await mergeEdit(env, "marriage", existing, baseVersionOf(b, url), (base) => ({ ...base, ...parseMarriage(b, base) }));
+  if (!changed.length) return json({ ok: true, version: existing.version, unchanged: true });
+  const m = parseMarriage(merged as unknown as Record<string, unknown>);
   await checkSpouses(env, me, m, existing);
+  let res;
   try {
-    await env.DB.prepare(
-      "UPDATE marriages SET husband_id = ?, wife_id = ?, status = ?, marriage_date = ?, end_date = ?, notes = ? WHERE id = ?",
-    )
-      .bind(m.husband_id, m.wife_id, m.status, m.marriage_date, m.end_date, m.notes, id)
-      .run();
+    [res] = await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE marriages SET husband_id = ?, wife_id = ?, status = ?, marriage_date = ?, end_date = ?, notes = ?, version = version + 1 WHERE id = ? RETURNING version",
+      ).bind(m.husband_id, m.wife_id, m.status, m.marriage_date, m.end_date, m.notes, id),
+      historyStmt(env, "marriage", "update", me, changed, "id = ?", [id]),
+    ]);
   } catch {
     throw new HttpError(409, "این ازدواج قبلاً ثبت شده است");
   }
-  return json({ ok: true });
+  return json({ ok: true, version: (res.results[0] as { version: number }).version });
 };
 
-const deleteMarriage: Handler = async ({ env, user, params }) => {
+const deleteMarriage: Handler = async ({ env, url, user, params }) => {
   const me = require(user, "viewer");
   const id = optId(params[0])!;
-  const existing = await env.DB.prepare("SELECT * FROM marriages WHERE id = ?").bind(id).first<Marriage>();
+  const existing = await env.DB.prepare(`SELECT ${MARRIAGE_COLS} FROM marriages WHERE id = ?`).bind(id).first<Marriage>();
   if (!existing) return json({ ok: true });
   const { perms } = await loadScoped(env, me);
   if (!canChange(perms, existing.husband_id) && !canChange(perms, existing.wife_id)) throw new HttpError(403, NOT_YOURS);
-  await env.DB.prepare("DELETE FROM marriages WHERE id = ?").bind(id).run();
+  checkDeleteVersion("marriage", existing, baseVersionOf(null, url));
+  await env.DB.batch([
+    historyStmt(env, "marriage", "delete", me, [], "id = ?", [id], 1),
+    env.DB.prepare("DELETE FROM marriages WHERE id = ?").bind(id),
+  ]);
   return json({ ok: true });
+};
+
+// ---------------------------------------------------------------------------
+// history
+
+interface HistoryRow {
+  id: number;
+  entity: Entity;
+  entity_id: number;
+  version: number;
+  action: string;
+  user_name: string;
+  at: string;
+  changed: string;
+  data: string;
+}
+
+const historyOut = (r: HistoryRow) => ({ ...r, changed: JSON.parse(r.changed), data: JSON.parse(r.data) });
+
+const entityHistory = (entity: Entity): Handler => async ({ env, user, params }) => {
+  const me = require(user, "viewer");
+  const id = optId(params[0])!;
+  const { people, marriages, perms } = await loadScoped(env, me);
+  if (entity === "person" ? !people.has(id) && me.role !== "admin" : false) throw new HttpError(404, "شخص یافت نشد");
+  if (entity === "person" && people.has(id) && !canSee(perms, id)) throw new HttpError(404, "شخص یافت نشد");
+  if (entity === "marriage") {
+    const m = marriages.find((x) => x.id === id);
+    if (m ? !(canSee(perms, m.husband_id) && canSee(perms, m.wife_id)) : me.role !== "admin") throw new HttpError(404, "ازدواج یافت نشد");
+  }
+  const { results } = await env.DB.prepare("SELECT * FROM history WHERE entity = ? AND entity_id = ? ORDER BY id DESC LIMIT 200")
+    .bind(entity, id)
+    .all<HistoryRow>();
+  return json({ history: results.map(historyOut) });
+};
+
+/** Recent changes the user is allowed to see (deleted people: admins only). */
+const recentHistory: Handler = async ({ env, url, user }) => {
+  const me = require(user, "viewer");
+  const { people, perms } = await loadScoped(env, me);
+  const before = optId(url.searchParams.get("before")) ?? 2 ** 53;
+  const out: ReturnType<typeof historyOut>[] = [];
+  let cursor = before;
+  // read in pages until enough visible rows are collected
+  for (let page = 0; page < 10 && out.length < 100; page++) {
+    const { results } = await env.DB.prepare("SELECT * FROM history WHERE id < ? ORDER BY id DESC LIMIT 300").bind(cursor).all<HistoryRow>();
+    if (!results.length) break;
+    for (const r of results) {
+      const row = historyOut(r);
+      const visible =
+        r.entity === "person"
+          ? people.has(r.entity_id)
+            ? canSee(perms, r.entity_id)
+            : me.role === "admin"
+          : canSee(perms, row.data.husband_id) && canSee(perms, row.data.wife_id);
+      if (visible && out.length < 100) out.push({ ...row, deleted: r.entity === "person" && !people.has(r.entity_id) } as never);
+    }
+    cursor = results[results.length - 1].id;
+  }
+  return json({ history: out, next: out.length === 100 ? out[out.length - 1].id : null });
 };
 
 // ---------------------------------------------------------------------------
@@ -792,7 +991,7 @@ const importData: Handler = async ({ env, request, user }) => {
     .map((r) => parseMarriage(r))
     .filter((m) => map.get(m.husband_id)?.gender === "male" && map.get(m.wife_id)?.gender === "female");
 
-  const stmts: D1PreparedStatement[] = [env.DB.prepare("DELETE FROM marriages"), env.DB.prepare("DELETE FROM people")];
+  const stmts: D1PreparedStatement[] = [env.DB.prepare("DELETE FROM marriages"), env.DB.prepare("DELETE FROM people"), env.DB.prepare("DELETE FROM history")];
   if (fileClans?.length) {
     stmts.push(env.DB.prepare("DELETE FROM clans"));
     if (!clanIds.size) stmts.push(env.DB.prepare("INSERT INTO clans (id, name) VALUES (1, 'خاندان اصلی')"));
@@ -818,6 +1017,7 @@ const importData: Handler = async ({ env, request, user }) => {
       ).bind(m.husband_id, m.wife_id, m.status, m.marriage_date, m.end_date, m.notes),
     );
   }
+  stmts.push(...baselineStmts(env));
   await env.DB.batch(stmts);
   return json({ ok: true, people: people.length, marriages: marriages.length });
 };
@@ -842,6 +1042,10 @@ const routes: [string, RegExp, Handler][] = [
   ["POST", /^\/api\/people$/, createPerson],
   ["PUT", /^\/api\/people\/(\d+)$/, updatePerson],
   ["POST", /^\/api\/people\/(\d+)\/move$/, movePerson],
+  ["POST", /^\/api\/people\/(\d+)\/restore$/, restorePerson],
+  ["GET", /^\/api\/people\/(\d+)\/history$/, entityHistory("person")],
+  ["GET", /^\/api\/marriages\/(\d+)\/history$/, entityHistory("marriage")],
+  ["GET", /^\/api\/history$/, recentHistory],
   ["POST", /^\/api\/clans$/, createClan],
   ["PUT", /^\/api\/clans\/(\d+)$/, updateClan],
   ["DELETE", /^\/api\/clans\/(\d+)$/, deleteClan],
@@ -882,7 +1086,7 @@ export default {
     try {
       return await handleApi(request, env, url);
     } catch (err) {
-      if (err instanceof HttpError) return json({ error: err.message }, err.status);
+      if (err instanceof HttpError) return json({ error: err.message, ...err.extra }, err.status);
       console.error(err);
       return json({ error: "خطای داخلی سرور" }, 500);
     }

@@ -1431,6 +1431,46 @@ table.users td {
   }
 }
 
+/* ---------- version control ---------- */
+
+.history .hrow {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0;
+  font-size: 13.5px;
+}
+.history .hrow:last-child {
+  border-bottom: 0;
+}
+.hchanges {
+  margin: 4px 0 6px;
+  padding-inline-start: 18px;
+}
+.conflict {
+  border: 1px solid color-mix(in srgb, var(--k-inlaw) 45%, var(--border));
+  background: color-mix(in srgb, var(--k-inlaw) 6%, var(--surface));
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+}
+.conflict.failed {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+}
+.conflict.waiting {
+  border-style: dashed;
+  background: none;
+}
+.conflict h4 {
+  margin: 0 0 4px;
+  font-size: 14.5px;
+}
+table.diff td .check {
+  margin: 0;
+}
+table.changes td {
+  white-space: normal;
+}
+
 /* ---------- offline ---------- */
 
 .net-chip {
