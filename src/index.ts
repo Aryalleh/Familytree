@@ -11,7 +11,7 @@ import {
 } from "./auth";
 import { HttpError, type Env, type Marriage, type Person, type Role, type User } from "./types";
 // shared with the browser, so both sides agree on generations and branches
-import { access } from "../public/js/generations.js";
+import { canAddInClan, permissions } from "../public/js/generations.js";
 
 type Ctx = { env: Env; request: Request; url: URL; user: User | null; params: string[] };
 type Handler = (ctx: Ctx) => Promise<Response>;
@@ -117,15 +117,15 @@ const register: Handler = async ({ env, request, url }) => {
   const displayName = str(b.display_name, 100) || username;
   validateCredentials(username, password);
   const res = await env.DB.prepare(
-    // self-registered accounts see nothing until an admin sets their access
-    `INSERT INTO users (username, display_name, password_hash, role, visible_gens)
-     SELECT ?, ?, ?, 'viewer', 0 WHERE EXISTS (SELECT 1 FROM users)
+    // self-registered accounts have no grants, so they see nothing until an admin gives them access
+    `INSERT INTO users (username, display_name, password_hash, role)
+     SELECT ?, ?, ?, 'viewer' WHERE EXISTS (SELECT 1 FROM users)
      ON CONFLICT(username) DO NOTHING`,
   )
     .bind(username, displayName, await hashPassword(password))
     .run();
   if (!res.meta.changes) throw new HttpError(409, "این نام کاربری قبلاً گرفته شده است");
-  const user: User = { id: Number(res.meta.last_row_id), username, display_name: displayName, role: "viewer", visible_gens: 0 };
+  const user: User = { id: Number(res.meta.last_row_id), username, display_name: displayName, role: "viewer" };
   return loginResponse(env, url, user, 201);
 };
 
@@ -133,7 +133,7 @@ const login: Handler = async ({ env, request, url }) => {
   const b = await body(request);
   const username = str(b.username, 32);
   const password = String(b.password ?? "");
-  const row = await env.DB.prepare("SELECT id, username, display_name, role, prefs, branch_root_id, visible_gens, password_hash FROM users WHERE username = ?")
+  const row = await env.DB.prepare("SELECT id, username, display_name, role, prefs, password_hash FROM users WHERE username = ?")
     .bind(username)
     .first<User & { password_hash: string }>();
   if (!row || !(await verifyPassword(password, row.password_hash))) {
@@ -178,27 +178,13 @@ const changePassword: Handler = async ({ env, request, user }) => {
 
 const listUsers: Handler = async ({ env, user }) => {
   require(user, "admin");
-  const { results } = await env.DB.prepare("SELECT id, username, display_name, role, branch_root_id, visible_gens, created_at FROM users ORDER BY id").all();
+  const { results } = await env.DB.prepare("SELECT id, username, display_name, role, created_at FROM users ORDER BY id").all();
   return json({ users: results, allowRegistration: await registrationOpen(env) });
 };
 
 function parseRole(v: unknown): Role {
   if (!ROLES.includes(v as Role)) throw new HttpError(400, "نقش نامعتبر است");
   return v as Role;
-}
-
-/** branch_root_id / visible_gens from a request: null = no restriction. */
-async function parseAccess(env: Env, b: Record<string, unknown>) {
-  const root = optId(b.branch_root_id);
-  if (root && !(await env.DB.prepare("SELECT 1 FROM people WHERE id = ?").bind(root).first())) {
-    throw new HttpError(400, "شخصِ مبنای شاخه وجود ندارد");
-  }
-  let gens: number | null = null;
-  if (b.visible_gens !== undefined && b.visible_gens !== null && b.visible_gens !== "") {
-    gens = Number(b.visible_gens);
-    if (!Number.isInteger(gens) || gens < 0 || gens > 200) throw new HttpError(400, "تعداد نسل نامعتبر است");
-  }
-  return { root, gens };
 }
 
 const createUser: Handler = async ({ env, request, user }) => {
@@ -208,12 +194,10 @@ const createUser: Handler = async ({ env, request, user }) => {
   const password = String(b.password ?? "");
   validateCredentials(username, password);
   const role = parseRole(b.role ?? "viewer");
-  const acc = await parseAccess(env, b);
   const res = await env.DB.prepare(
-    `INSERT INTO users (username, display_name, password_hash, role, branch_root_id, visible_gens) VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(username) DO NOTHING`,
+    "INSERT INTO users (username, display_name, password_hash, role) VALUES (?, ?, ?, ?) ON CONFLICT(username) DO NOTHING",
   )
-    .bind(username, str(b.display_name, 100) || username, await hashPassword(password), role, acc.root, acc.gens)
+    .bind(username, str(b.display_name, 100) || username, await hashPassword(password), role)
     .run();
   if (!res.meta.changes) throw new HttpError(409, "این نام کاربری قبلاً گرفته شده است");
   return json({ id: res.meta.last_row_id }, 201);
@@ -240,10 +224,6 @@ const updateUser: Handler = async ({ env, request, user, params }) => {
   }
   if (b.display_name !== undefined) {
     stmts.push(env.DB.prepare("UPDATE users SET display_name = ? WHERE id = ?").bind(str(b.display_name, 100), id));
-  }
-  if (b.branch_root_id !== undefined || b.visible_gens !== undefined) {
-    const acc = await parseAccess(env, b);
-    stmts.push(env.DB.prepare("UPDATE users SET branch_root_id = ?, visible_gens = ? WHERE id = ?").bind(acc.root, acc.gens, id));
   }
   if (b.password) {
     const pw = String(b.password);
@@ -280,7 +260,7 @@ const updateSettings: Handler = async ({ env, request, user }) => {
 // family tree
 
 const PERSON_COLS =
-  "id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id";
+  "id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id";
 
 function isAncestor(people: Map<number, Person>, ancestorId: number, personId: number): boolean {
   const stack = [personId];
@@ -321,6 +301,7 @@ function parsePerson(b: Record<string, unknown>, base?: Person): PersonInput {
     notes: str(pick("notes"), 5000),
     father_id: optId(pick("father_id")),
     mother_id: optId(pick("mother_id")),
+    clan_id: optId(pick("clan_id")),
   };
 }
 
@@ -340,70 +321,117 @@ function checkParents(people: Map<number, Person>, p: PersonInput, selfId?: numb
   }
 }
 
-type Access = ReturnType<typeof access>;
+type Perms = ReturnType<typeof permissions>;
+interface Grant {
+  id?: number;
+  user_id?: number | null;
+  group_id?: number | null;
+  clan_id: number | null;
+  root_id: number | null;
+  level: "view" | "edit" | "delete";
+  max_gen: number | null;
+}
+interface Clan {
+  id: number;
+  name: string;
+  description: string;
+}
 
-/** Everything plus what this user may see and edit (see public/js/generations.js). */
+/** A user's own grants plus those of every group they belong to. */
+async function grantsOf(env: Env, user: User): Promise<Grant[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT clan_id, root_id, level, max_gen FROM grants WHERE user_id = ?1
+     UNION ALL
+     SELECT g.clan_id, g.root_id, g.level, g.max_gen FROM grants g JOIN user_groups ug ON ug.group_id = g.group_id WHERE ug.user_id = ?1`,
+  )
+    .bind(user.id)
+    .all<Grant>();
+  return results;
+}
+
+/** Everything plus what this user may see, edit and delete (see public/js/generations.js). */
 async function loadScoped(env: Env, user: User) {
-  const [pr, mr] = await env.DB.batch([
+  const [pr, mr, cr] = await env.DB.batch([
     env.DB.prepare(`SELECT ${PERSON_COLS} FROM people ORDER BY id`),
     env.DB.prepare("SELECT id, husband_id, wife_id, status, marriage_date, end_date, notes FROM marriages ORDER BY id"),
+    env.DB.prepare("SELECT id, name, description FROM clans ORDER BY id"),
   ]);
   const people = pr.results as unknown as Person[];
   const marriages = mr.results as unknown as Marriage[];
-  const acc: Access = access(user, people, marriages);
-  return { people: new Map(people.map((p) => [p.id, p])), list: people, marriages, acc };
+  const clans = cr.results as unknown as Clan[];
+  const perms: Perms = permissions(user, people, marriages, user.role === "admin" ? [] : await grantsOf(env, user));
+  return { people: new Map(people.map((p) => [p.id, p])), list: people, marriages, clans, perms };
 }
 
-const canSee = (acc: Access, id: number | null) => id != null && (!acc.visible || acc.visible.has(id));
-const canChange = (acc: Access, id: number | null) => id != null && (!acc.editable || acc.editable.has(id));
+const canSee = (pm: Perms, id: number | null) => id != null && (pm.all || pm.visible!.has(id));
+const canChange = (pm: Perms, id: number | null) => id != null && (pm.all || pm.editable!.has(id));
+const canDelete = (pm: Perms, id: number | null) => id != null && (pm.all || pm.deletable!.has(id));
 const NOT_YOURS = "این شخص در محدودهٔ ویرایش شما نیست";
 
 /** Parents/spouses named in an edit must be people the user can see. */
-function requireVisible(acc: Access, ids: (number | null)[]) {
-  for (const id of ids) if (id != null && !canSee(acc, id)) throw new HttpError(400, "شخص انتخاب‌شده وجود ندارد");
+function requireVisible(pm: Perms, ids: (number | null)[]) {
+  for (const id of ids) if (id != null && !canSee(pm, id)) throw new HttpError(400, "شخص انتخاب‌شده وجود ندارد");
+}
+
+function requireClan(clans: Clan[], id: number) {
+  if (!clans.some((c) => c.id === id)) throw new HttpError(400, "طایفهٔ انتخاب‌شده وجود ندارد");
 }
 
 const getTree: Handler = async ({ env, user }) => {
   const me = require(user, "viewer");
-  const { list, marriages, acc } = await loadScoped(env, me);
+  const { list, marriages, clans, perms } = await loadScoped(env, me);
   const people = list
-    .filter((p) => canSee(acc, p.id))
+    .filter((p) => canSee(perms, p.id))
     .map((p) => ({
       ...p,
-      gen: acc.gens.get(p.id),
       // don't reveal links to people this user may not see
-      father_id: canSee(acc, p.father_id) ? p.father_id : null,
-      mother_id: canSee(acc, p.mother_id) ? p.mother_id : null,
+      father_id: canSee(perms, p.father_id) ? p.father_id : null,
+      mother_id: canSee(perms, p.mother_id) ? p.mother_id : null,
     }));
+  const shownClans = new Set(people.map((p) => p.clan_id));
   return json({
     people,
-    marriages: marriages.filter((m) => canSee(acc, m.husband_id) && canSee(acc, m.wife_id)),
-    access: { all: acc.all, branch_root_id: me.branch_root_id ?? null, visible_gens: me.visible_gens ?? null },
+    marriages: marriages.filter((m) => canSee(perms, m.husband_id) && canSee(perms, m.wife_id)),
+    clans: perms.all ? clans : clans.filter((c) => shownClans.has(c.id) || perms.addClans!.has(c.id) || perms.addClans!.has(null)),
+    access: perms.all
+      ? { all: true }
+      : {
+          all: false,
+          everything: perms.everything,
+          editable: [...perms.editable!],
+          deletable: [...perms.deletable!],
+          addClans: [...perms.addClans!],
+        },
   });
 };
 
 const createPerson: Handler = async ({ env, request, user }) => {
-  const me = require(user, "editor");
+  const me = require(user, "viewer");
   const b = await body(request);
   const p = parsePerson(b);
-  const { people, acc } = await loadScoped(env, me);
+  const { people, clans, perms } = await loadScoped(env, me);
   const spouseOfId = optId(b.spouse_of);
-  requireVisible(acc, [p.father_id, p.mother_id, spouseOfId]);
-  if (me.branch_root_id != null && !(canChange(acc, p.father_id) || canChange(acc, p.mother_id) || canChange(acc, spouseOfId))) {
-    throw new HttpError(403, "فقط می‌توانید فرزند یا همسرِ افراد شاخهٔ خودتان را اضافه کنید");
+  requireVisible(perms, [p.father_id, p.mother_id, spouseOfId]);
+  // default clan: the father's, else the mother's, else the spouse's
+  const linked = [p.father_id, p.mother_id, spouseOfId].map((id) => (id ? people.get(id) : undefined)).find(Boolean);
+  if (p.clan_id == null) p.clan_id = linked?.clan_id ?? clans[0]?.id ?? 1;
+  requireClan(clans, p.clan_id);
+  // a new person must hang off someone the user may edit, unless they may add anywhere in that clan
+  const attached = canChange(perms, p.father_id) || canChange(perms, p.mother_id) || canChange(perms, spouseOfId);
+  if (!attached && !canAddInClan(perms, p.clan_id)) {
+    throw new HttpError(403, "فقط می‌توانید فرزند یا همسرِ افرادی را که اجازهٔ ویرایششان را دارید اضافه کنید");
   }
   checkParents(people, p);
   const row = await env.DB.prepare(
-    `INSERT INTO people (first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${PERSON_COLS}`,
+    `INSERT INTO people (first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${PERSON_COLS}`,
   )
-    .bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id)
+    .bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id)
     .first<Person>();
 
   // Optional: link the new person as spouse of an existing person in the same request.
-  const spouseOf = spouseOfId;
-  if (spouseOf && row) {
-    const other = people.get(spouseOf);
+  if (spouseOfId && row) {
+    const other = people.get(spouseOfId);
     if (other && other.gender !== row.gender) {
       const [h, w] = row.gender === "male" ? [row.id, other.id] : [other.id, row.id];
       await env.DB.prepare("INSERT INTO marriages (husband_id, wife_id) VALUES (?, ?) ON CONFLICT DO NOTHING").bind(h, w).run();
@@ -413,16 +441,20 @@ const createPerson: Handler = async ({ env, request, user }) => {
 };
 
 const updatePerson: Handler = async ({ env, request, user, params }) => {
-  const me = require(user, "editor");
+  const me = require(user, "viewer");
   const id = optId(params[0])!;
-  const { people, acc } = await loadScoped(env, me);
+  const { people, clans, perms } = await loadScoped(env, me);
   const existing = people.get(id);
-  if (!existing || !canSee(acc, id)) throw new HttpError(404, "شخص یافت نشد");
-  if (!canChange(acc, id)) throw new HttpError(403, NOT_YOURS);
+  if (!existing || !canSee(perms, id)) throw new HttpError(404, "شخص یافت نشد");
+  if (!canChange(perms, id)) throw new HttpError(403, NOT_YOURS);
   const p = parsePerson(await body(request), existing);
   // hidden parents stay as they are; new ones must be visible
-  if (p.father_id !== existing.father_id) requireVisible(acc, [p.father_id]);
-  if (p.mother_id !== existing.mother_id) requireVisible(acc, [p.mother_id]);
+  if (p.father_id !== existing.father_id) requireVisible(perms, [p.father_id]);
+  if (p.mother_id !== existing.mother_id) requireVisible(perms, [p.mother_id]);
+  if (p.clan_id !== existing.clan_id) {
+    requireClan(clans, p.clan_id!);
+    if (!canAddInClan(perms, p.clan_id)) throw new HttpError(403, "اجازهٔ افزودن به آن طایفه را ندارید");
+  }
   checkParents(people, p, id);
   if (p.gender !== existing.gender) {
     const key = existing.gender === "male" ? "father_id" : "mother_id";
@@ -434,25 +466,57 @@ const updatePerson: Handler = async ({ env, request, user, params }) => {
   }
   const row = await env.DB.prepare(
     `UPDATE people SET first_name = ?, last_name = ?, nickname = ?, gender = ?, birth_date = ?, death_date = ?, is_deceased = ?,
-       birth_place = ?, photo_url = ?, notes = ?, father_id = ?, mother_id = ?, updated_at = CURRENT_TIMESTAMP
+       birth_place = ?, photo_url = ?, notes = ?, father_id = ?, mother_id = ?, clan_id = ?, updated_at = CURRENT_TIMESTAMP
      WHERE id = ? RETURNING ${PERSON_COLS}`,
   )
-    .bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, id)
+    .bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, id)
     .first<Person>();
   return json({ person: row });
 };
 
-const deletePerson: Handler = async ({ env, user, params }) => {
-  const me = require(user, "editor");
+/** Move a person — optionally with their ancestors or descendants — to another clan. */
+const movePerson: Handler = async ({ env, request, user, params }) => {
+  const me = require(user, "viewer");
   const id = optId(params[0])!;
-  const { acc } = await loadScoped(env, me);
-  if (!canSee(acc, id)) throw new HttpError(404, "شخص یافت نشد");
-  if (!canChange(acc, id)) throw new HttpError(403, NOT_YOURS);
-  // deleting a branch root would silently widen that user's access
-  const owner = await env.DB.prepare("SELECT display_name, username FROM users WHERE branch_root_id = ? LIMIT 1")
+  const b = await body(request);
+  const clanId = optId(b.clan_id);
+  const { people, list, clans, perms } = await loadScoped(env, me);
+  if (!people.has(id) || !canSee(perms, id)) throw new HttpError(404, "شخص یافت نشد");
+  if (!clanId) throw new HttpError(400, "طایفه را انتخاب کنید");
+  requireClan(clans, clanId);
+  if (!canAddInClan(perms, clanId)) throw new HttpError(403, "اجازهٔ افزودن به آن طایفه را ندارید");
+  const ids = new Set([id]);
+  const walk = (next: (p: Person) => number[]) => {
+    const stack = [id];
+    while (stack.length) {
+      for (const n of next(people.get(stack.pop()!)!)) if (people.has(n) && !ids.has(n)) (ids.add(n), stack.push(n));
+    }
+  };
+  if (b.with === "ancestors") walk((p) => [p.father_id, p.mother_id].filter((x): x is number => !!x));
+  // children take the father's clan, so descendants are followed through the father's line
+  if (b.with === "descendants") walk((p) => list.filter((c) => c.father_id === p.id || (c.mother_id === p.id && !c.father_id)).map((c) => c.id));
+  // only people the user may edit, and only people in the person's current clan
+  const from = people.get(id)!.clan_id;
+  const move = [...ids].filter((x) => canChange(perms, x) && people.get(x)!.clan_id === from);
+  await env.DB.batch(move.map((x) => env.DB.prepare("UPDATE people SET clan_id = ? WHERE id = ?").bind(clanId, x)));
+  return json({ ok: true, moved: move.length });
+};
+
+const deletePerson: Handler = async ({ env, user, params }) => {
+  const me = require(user, "viewer");
+  const id = optId(params[0])!;
+  const { perms } = await loadScoped(env, me);
+  if (!canSee(perms, id)) throw new HttpError(404, "شخص یافت نشد");
+  if (!canDelete(perms, id)) throw new HttpError(403, "اجازهٔ حذف این شخص را ندارید");
+  // deleting a branch root would silently change what a grant covers
+  const used = await env.DB.prepare(
+    `SELECT COALESCE(u.display_name, u.username, ag.name) AS who FROM grants g
+     LEFT JOIN users u ON u.id = g.user_id LEFT JOIN access_groups ag ON ag.id = g.group_id
+     WHERE g.root_id = ? LIMIT 1`,
+  )
     .bind(id)
-    .first<{ display_name: string; username: string }>();
-  if (owner) throw new HttpError(400, `این شخص مبنای دسترسی کاربر «${owner.display_name || owner.username}» است؛ ابتدا دسترسی او را تغییر دهید`);
+    .first<{ who: string }>();
+  if (used) throw new HttpError(400, `این شخص مبنای یک دسترسی («${used.who}») است؛ ابتدا آن دسترسی را تغییر دهید`);
   await env.DB.batch([
     env.DB.prepare("UPDATE people SET father_id = NULL WHERE father_id = ?").bind(id),
     env.DB.prepare("UPDATE people SET mother_id = NULL WHERE mother_id = ?").bind(id),
@@ -482,10 +546,10 @@ function parseMarriage(b: Record<string, unknown>, base?: Marriage): Omit<Marria
 }
 
 async function checkSpouses(env: Env, user: User, m: Omit<Marriage, "id">, existing?: Marriage) {
-  const { people, acc } = await loadScoped(env, user);
-  requireVisible(acc, [m.husband_id, m.wife_id]);
-  if (!canChange(acc, m.husband_id) && !canChange(acc, m.wife_id)) throw new HttpError(403, NOT_YOURS);
-  if (existing && !canChange(acc, existing.husband_id) && !canChange(acc, existing.wife_id)) throw new HttpError(403, NOT_YOURS);
+  const { people, perms } = await loadScoped(env, user);
+  requireVisible(perms, [m.husband_id, m.wife_id]);
+  if (!canChange(perms, m.husband_id) && !canChange(perms, m.wife_id)) throw new HttpError(403, NOT_YOURS);
+  if (existing && !canChange(perms, existing.husband_id) && !canChange(perms, existing.wife_id)) throw new HttpError(403, NOT_YOURS);
   const h = people.get(m.husband_id);
   const w = people.get(m.wife_id);
   if (!h || !w) throw new HttpError(400, "شخص انتخاب‌شده وجود ندارد");
@@ -497,7 +561,7 @@ async function checkSpouses(env: Env, user: User, m: Omit<Marriage, "id">, exist
 }
 
 const createMarriage: Handler = async ({ env, request, user }) => {
-  const me = require(user, "editor");
+  const me = require(user, "viewer");
   const m = parseMarriage(await body(request));
   await checkSpouses(env, me, m);
   const row = await env.DB.prepare(
@@ -511,7 +575,7 @@ const createMarriage: Handler = async ({ env, request, user }) => {
 };
 
 const updateMarriage: Handler = async ({ env, request, user, params }) => {
-  const me = require(user, "editor");
+  const me = require(user, "viewer");
   const id = optId(params[0])!;
   const existing = await env.DB.prepare("SELECT * FROM marriages WHERE id = ?").bind(id).first<Marriage>();
   if (!existing) throw new HttpError(404, "ازدواج یافت نشد");
@@ -530,13 +594,157 @@ const updateMarriage: Handler = async ({ env, request, user, params }) => {
 };
 
 const deleteMarriage: Handler = async ({ env, user, params }) => {
-  const me = require(user, "editor");
+  const me = require(user, "viewer");
   const id = optId(params[0])!;
   const existing = await env.DB.prepare("SELECT * FROM marriages WHERE id = ?").bind(id).first<Marriage>();
   if (!existing) return json({ ok: true });
-  const { acc } = await loadScoped(env, me);
-  if (!canChange(acc, existing.husband_id) && !canChange(acc, existing.wife_id)) throw new HttpError(403, NOT_YOURS);
+  const { perms } = await loadScoped(env, me);
+  if (!canChange(perms, existing.husband_id) && !canChange(perms, existing.wife_id)) throw new HttpError(403, NOT_YOURS);
   await env.DB.prepare("DELETE FROM marriages WHERE id = ?").bind(id).run();
+  return json({ ok: true });
+};
+
+// ---------------------------------------------------------------------------
+// clans (admin)
+
+const createClan: Handler = async ({ env, request, user }) => {
+  require(user, "admin");
+  const b = await body(request);
+  const name = str(b.name, 100);
+  if (!name) throw new HttpError(400, "نام طایفه الزامی است");
+  const row = await env.DB.prepare("INSERT INTO clans (name, description) VALUES (?, ?) RETURNING id, name, description")
+    .bind(name, str(b.description, 1000))
+    .first<Clan>();
+  return json({ clan: row }, 201);
+};
+
+const updateClan: Handler = async ({ env, request, user, params }) => {
+  require(user, "admin");
+  const b = await body(request);
+  const name = str(b.name, 100);
+  if (!name) throw new HttpError(400, "نام طایفه الزامی است");
+  await env.DB.prepare("UPDATE clans SET name = ?, description = ? WHERE id = ?").bind(name, str(b.description, 1000), optId(params[0])).run();
+  return json({ ok: true });
+};
+
+const deleteClan: Handler = async ({ env, user, params }) => {
+  require(user, "admin");
+  const id = optId(params[0])!;
+  const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM people WHERE clan_id = ?").bind(id).first<{ n: number }>();
+  if (n?.n) throw new HttpError(400, "این طایفه هنوز عضو دارد؛ ابتدا اعضا را به طایفهٔ دیگری منتقل یا حذف کنید");
+  const total = await env.DB.prepare("SELECT COUNT(*) AS n FROM clans").first<{ n: number }>();
+  if ((total?.n ?? 0) <= 1) throw new HttpError(400, "دست‌کم یک طایفه باید باقی بماند");
+  await env.DB.batch([env.DB.prepare("DELETE FROM grants WHERE clan_id = ?").bind(id), env.DB.prepare("DELETE FROM clans WHERE id = ?").bind(id)]);
+  return json({ ok: true });
+};
+
+// ---------------------------------------------------------------------------
+// access: groups and grants (admin)
+
+const LEVEL_NAMES = ["view", "edit", "delete"];
+
+async function parseGrants(env: Env, raw: unknown): Promise<Grant[]> {
+  if (!Array.isArray(raw)) throw new HttpError(400, "فهرست دسترسی نامعتبر است");
+  if (raw.length > 100) throw new HttpError(400, "دسترسی‌ها بیش از اندازه است");
+  const out: Grant[] = [];
+  for (const r of raw as Record<string, unknown>[]) {
+    const level = String(r.level);
+    if (!LEVEL_NAMES.includes(level)) throw new HttpError(400, "سطح دسترسی نامعتبر است");
+    const clan = optId(r.clan_id);
+    const root = optId(r.root_id);
+    let max: number | null = null;
+    if (r.max_gen !== undefined && r.max_gen !== null && r.max_gen !== "") {
+      max = Number(r.max_gen);
+      if (!Number.isInteger(max) || max < 1 || max > 200) throw new HttpError(400, "تعداد نسل نامعتبر است");
+    }
+    if (clan && !(await env.DB.prepare("SELECT 1 FROM clans WHERE id = ?").bind(clan).first())) throw new HttpError(400, "طایفه وجود ندارد");
+    if (root && !(await env.DB.prepare("SELECT 1 FROM people WHERE id = ?").bind(root).first())) throw new HttpError(400, "شخصِ مبنای شاخه وجود ندارد");
+    out.push({ clan_id: clan, root_id: root, level: level as Grant["level"], max_gen: max });
+  }
+  return out;
+}
+
+const grantInsert = (env: Env, owner: "user_id" | "group_id", id: number, g: Grant) =>
+  env.DB.prepare(`INSERT INTO grants (${owner}, clan_id, root_id, level, max_gen) VALUES (?, ?, ?, ?, ?)`).bind(id, g.clan_id, g.root_id, g.level, g.max_gen);
+
+const getAccess: Handler = async ({ env, user }) => {
+  require(user, "admin");
+  const [u, g, ug, gr] = await env.DB.batch([
+    env.DB.prepare("SELECT id, username, display_name, role FROM users ORDER BY id"),
+    env.DB.prepare("SELECT id, name, description FROM access_groups ORDER BY name"),
+    env.DB.prepare("SELECT user_id, group_id FROM user_groups"),
+    env.DB.prepare("SELECT id, user_id, group_id, clan_id, root_id, level, max_gen FROM grants ORDER BY id"),
+  ]);
+  const links = ug.results as { user_id: number; group_id: number }[];
+  const grants = gr.results as unknown as Grant[];
+  return json({
+    users: (u.results as unknown as User[]).map((x) => ({
+      ...x,
+      groups: links.filter((l) => l.user_id === x.id).map((l) => l.group_id),
+      grants: grants.filter((q) => q.user_id === x.id),
+    })),
+    groups: (g.results as { id: number; name: string; description: string }[]).map((x) => ({
+      ...x,
+      members: links.filter((l) => l.group_id === x.id).map((l) => l.user_id),
+      grants: grants.filter((q) => q.group_id === x.id),
+    })),
+  });
+};
+
+const setUserAccess: Handler = async ({ env, request, user, params }) => {
+  require(user, "admin");
+  const id = optId(params[0])!;
+  const b = await body(request);
+  const grants = await parseGrants(env, b.grants ?? []);
+  const groups = Array.isArray(b.groups) ? [...new Set((b.groups as unknown[]).map(optId).filter((x): x is number => !!x))] : [];
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM grants WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM user_groups WHERE user_id = ?").bind(id),
+    ...grants.map((g) => grantInsert(env, "user_id", id, g)),
+    ...groups.map((gid) => env.DB.prepare("INSERT OR IGNORE INTO user_groups (user_id, group_id) SELECT ?, id FROM access_groups WHERE id = ?").bind(id, gid)),
+  ]);
+  return json({ ok: true });
+};
+
+async function saveGroup(env: Env, id: number | null, b: Record<string, unknown>) {
+  const name = str(b.name, 100);
+  if (!name) throw new HttpError(400, "نام گروه الزامی است");
+  const grants = await parseGrants(env, b.grants ?? []);
+  const members = Array.isArray(b.members) ? [...new Set((b.members as unknown[]).map(optId).filter((x): x is number => !!x))] : [];
+  if (id == null) {
+    const row = await env.DB.prepare("INSERT INTO access_groups (name, description) VALUES (?, ?) RETURNING id").bind(name, str(b.description, 500)).first<{ id: number }>();
+    id = row!.id;
+  } else {
+    await env.DB.prepare("UPDATE access_groups SET name = ?, description = ? WHERE id = ?").bind(name, str(b.description, 500), id).run();
+  }
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM grants WHERE group_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM user_groups WHERE group_id = ?").bind(id),
+    ...grants.map((g) => grantInsert(env, "group_id", id!, g)),
+    ...members.map((uid) => env.DB.prepare("INSERT OR IGNORE INTO user_groups (user_id, group_id) SELECT id, ? FROM users WHERE id = ?").bind(id, uid)),
+  ]);
+  return id;
+}
+
+const createGroup: Handler = async ({ env, request, user }) => {
+  require(user, "admin");
+  return json({ id: await saveGroup(env, null, await body(request)) }, 201);
+};
+
+const updateGroup: Handler = async ({ env, request, user, params }) => {
+  require(user, "admin");
+  await saveGroup(env, optId(params[0]), await body(request));
+  return json({ ok: true });
+};
+
+const deleteGroup: Handler = async ({ env, user, params }) => {
+  require(user, "admin");
+  const id = optId(params[0]);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM grants WHERE group_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM user_groups WHERE group_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM access_groups WHERE id = ?").bind(id),
+  ]);
   return json({ ok: true });
 };
 
@@ -546,7 +754,8 @@ const deleteMarriage: Handler = async ({ env, user, params }) => {
 const exportData: Handler = async ({ env, user }) => {
   require(user, "admin");
   const res = await getTree({ env, user } as Ctx);
-  const data = (await res.json()) as object;
+  const data = (await res.json()) as Record<string, unknown>;
+  delete data.access;
   return json({ format: "familytree/v1", exported_at: new Date().toISOString(), ...data }, 200, {
     "Content-Disposition": 'attachment; filename="familytree-backup.json"',
   });
@@ -556,13 +765,23 @@ const importData: Handler = async ({ env, request, user }) => {
   require(user, "admin");
   const b = await body(request);
   if (!Array.isArray(b.people) || !Array.isArray(b.marriages)) throw new HttpError(400, "فایل پشتیبان نامعتبر است");
+  // clans: from the file, or keep the current ones
+  const fileClans = Array.isArray(b.clans)
+    ? (b.clans as Record<string, unknown>[]).map((c) => ({ id: optId(c.id)!, name: str(c.name, 100) || "طایفه", description: str(c.description, 1000) })).filter((c) => c.id)
+    : null;
+  const clanIds = new Set(
+    fileClans ? fileClans.map((c) => c.id) : ((await env.DB.prepare("SELECT id FROM clans").all<{ id: number }>()).results.map((c) => c.id)),
+  );
+  const fallbackClan = [...clanIds][0] ?? 1;
   const rawPeople = b.people as Record<string, unknown>[];
   const ids = new Set<number>();
   const people = rawPeople.map((r) => {
     const id = optId(r.id);
     if (!id || ids.has(id)) throw new HttpError(400, "شناسهٔ اشخاص در فایل نامعتبر یا تکراری است");
     ids.add(id);
-    return { id, ...parsePerson(r) } as Person;
+    const p = { id, ...parsePerson(r) } as Person;
+    if (p.clan_id == null || !clanIds.has(p.clan_id)) p.clan_id = fallbackClan;
+    return p;
   });
   const map = new Map(people.map((p) => [p.id, p]));
   for (const p of people) {
@@ -574,12 +793,17 @@ const importData: Handler = async ({ env, request, user }) => {
     .filter((m) => map.get(m.husband_id)?.gender === "male" && map.get(m.wife_id)?.gender === "female");
 
   const stmts: D1PreparedStatement[] = [env.DB.prepare("DELETE FROM marriages"), env.DB.prepare("DELETE FROM people")];
+  if (fileClans?.length) {
+    stmts.push(env.DB.prepare("DELETE FROM clans"));
+    if (!clanIds.size) stmts.push(env.DB.prepare("INSERT INTO clans (id, name) VALUES (1, 'خاندان اصلی')"));
+    for (const c of fileClans) stmts.push(env.DB.prepare("INSERT INTO clans (id, name, description) VALUES (?, ?, ?)").bind(c.id, c.name, c.description));
+  }
   for (const p of people) {
     stmts.push(
       env.DB.prepare(
-        `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(p.id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes),
+        `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, clan_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(p.id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.clan_id),
     );
   }
   for (const p of people) {
@@ -617,6 +841,15 @@ const routes: [string, RegExp, Handler][] = [
   ["GET", /^\/api\/tree$/, getTree],
   ["POST", /^\/api\/people$/, createPerson],
   ["PUT", /^\/api\/people\/(\d+)$/, updatePerson],
+  ["POST", /^\/api\/people\/(\d+)\/move$/, movePerson],
+  ["POST", /^\/api\/clans$/, createClan],
+  ["PUT", /^\/api\/clans\/(\d+)$/, updateClan],
+  ["DELETE", /^\/api\/clans\/(\d+)$/, deleteClan],
+  ["GET", /^\/api\/access$/, getAccess],
+  ["PUT", /^\/api\/users\/(\d+)\/access$/, setUserAccess],
+  ["POST", /^\/api\/groups$/, createGroup],
+  ["PUT", /^\/api\/groups\/(\d+)$/, updateGroup],
+  ["DELETE", /^\/api\/groups\/(\d+)$/, deleteGroup],
   ["DELETE", /^\/api\/people\/(\d+)$/, deletePerson],
   ["POST", /^\/api\/marriages$/, createMarriage],
   ["PUT", /^\/api\/marriages\/(\d+)$/, updateMarriage],

@@ -55,6 +55,7 @@ const PERSON_DEFAULTS = {
   notes: "",
   father_id: null,
   mother_id: null,
+  clan_id: null,
 };
 const MARRIAGE_DEFAULTS = { status: "married", marriage_date: "", end_date: "", notes: "" };
 
@@ -63,7 +64,7 @@ const idOrNull = (v) => (v === "" || v == null ? null : Number(v));
 function cleanPerson(d) {
   const out = {};
   for (const k of Object.keys(PERSON_DEFAULTS)) if (d[k] !== undefined) out[k] = d[k];
-  for (const k of ["father_id", "mother_id"]) if (k in out) out[k] = idOrNull(out[k]);
+  for (const k of ["father_id", "mother_id", "clan_id"]) if (k in out) out[k] = idOrNull(out[k]);
   if ("is_deceased" in out || "death_date" in out) out.is_deceased = out.is_deceased || out.death_date ? 1 : 0;
   for (const k of Object.keys(out)) if (typeof out[k] === "string") out[k] = out[k].trim();
   return out;
@@ -99,6 +100,7 @@ export function applyOps(people, marriages, ops, { strict = false } = {}) {
     switch (op.type) {
       case "createPerson": {
         const d = { ...PERSON_DEFAULTS, ...cleanPerson(op.data), id: op.id };
+        if (d.clan_id == null) d.clan_id = (P.get(d.father_id) || P.get(d.mother_id) || P.get(Number(op.data.spouse_of)))?.clan_id ?? null;
         if (!d.first_name) {
           fail("نام الزامی است");
           break;

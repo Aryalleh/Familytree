@@ -112,3 +112,111 @@ export function access(user, people, marriages, gens = generations(people, marri
   const editable = user.role === "editor" ? (root != null ? branch : visible) : new Set();
   return { all, visible, editable, branch, gens };
 }
+
+// ---------------------------------------------------------------------------
+// clans (طایفه‌ها) and grants
+
+/**
+ * A clan's tree: its members plus "guests" — spouses and children of members who belong to
+ * another clan (a bride from another family, a daughter's children).
+ */
+export function clanView(clanId, people, marriages) {
+  const members = new Set(people.filter((p) => p.clan_id === clanId).map((p) => p.id));
+  const guests = new Set();
+  for (const m of marriages) {
+    if (members.has(m.husband_id) && !members.has(m.wife_id)) guests.add(m.wife_id);
+    if (members.has(m.wife_id) && !members.has(m.husband_id)) guests.add(m.husband_id);
+  }
+  for (const p of people) {
+    if (!members.has(p.id) && (members.has(p.father_id) || members.has(p.mother_id))) guests.add(p.id);
+  }
+  return { members, guests };
+}
+
+/** Generations computed inside a set of people (so each clan starts at generation 1). */
+export function generationsWithin(ids, people, marriages) {
+  const sub = people.filter((p) => ids.has(p.id));
+  return generations(
+    sub,
+    marriages.filter((m) => ids.has(m.husband_id) && ids.has(m.wife_id)),
+  );
+}
+
+/** Each person's generation inside their own clan. */
+export function homeGenerations(people, marriages) {
+  const byClan = new Map();
+  for (const p of people) {
+    if (!byClan.has(p.clan_id)) byClan.set(p.clan_id, new Set());
+    byClan.get(p.clan_id).add(p.id);
+  }
+  const out = new Map();
+  for (const ids of byClan.values()) for (const [id, g] of generationsWithin(ids, people, marriages)) out.set(id, g);
+  return out;
+}
+
+const LEVELS = { view: 1, edit: 2, delete: 3 };
+
+/**
+ * Effective permissions from a list of grants (a user's own plus those of their groups).
+ * A grant: {clan_id|null, root_id|null, level:'view'|'edit'|'delete', max_gen|null}
+ *  - root_id: that person's branch (them, descendants, spouses) — the root's ancestors stay
+ *    visible for context; otherwise the whole clan (members + guests), or everything when
+ *    clan_id is null too
+ *  - max_gen: only people down to that generation (counted inside the clan's tree)
+ * @returns {{all:boolean, everything?:boolean, visible:Set<number>|null, editable:Set<number>|null, deletable:Set<number>|null, addClans:Set<number|null>|null}}
+ */
+export function permissions(user, people, marriages, grants) {
+  if (user.role === "admin") return { all: true, visible: null, editable: null, deletable: null, addClans: null };
+  const byId = new Map(people.map((p) => [p.id, p]));
+  const visible = new Set();
+  const editable = new Set();
+  const deletable = new Set();
+  const addClans = new Set(); // clans where unlinked people may be added; null = any clan
+  const clanCache = new Map();
+  const viewOf = (clanId) => {
+    if (!clanCache.has(clanId)) {
+      const v = clanView(clanId, people, marriages);
+      const ids = new Set([...v.members, ...v.guests]);
+      clanCache.set(clanId, { ids, gens: generationsWithin(ids, people, marriages) });
+    }
+    return clanCache.get(clanId);
+  };
+  let home = null;
+  for (const g of grants) {
+    const level = LEVELS[g.level] || 0;
+    if (!level) continue;
+    let scope;
+    let gens;
+    let editScope = null; // clan grants edit members only; their guests are just visible
+    if (g.root_id != null) {
+      const root = byId.get(g.root_id);
+      if (!root) continue;
+      scope = branchOf(g.root_id, people, marriages);
+      for (const id of lineageOf(g.root_id, people, marriages)) visible.add(id);
+      const clan = viewOf(root.clan_id);
+      const ids = new Set([...clan.ids, ...scope]);
+      gens = generationsWithin(ids, people, marriages);
+    } else if (g.clan_id != null) {
+      const clan = viewOf(g.clan_id);
+      scope = clan.ids;
+      gens = clan.gens;
+      editScope = new Set(people.filter((p) => p.clan_id === g.clan_id).map((p) => p.id));
+      if (level >= LEVELS.edit && g.max_gen == null) addClans.add(g.clan_id);
+    } else {
+      scope = new Set(byId.keys());
+      gens = home ??= homeGenerations(people, marriages);
+      if (level >= LEVELS.edit && g.max_gen == null) addClans.add(null);
+    }
+    for (const id of scope) {
+      if (g.max_gen != null && (gens.get(id) ?? 1) > g.max_gen) continue;
+      visible.add(id);
+      if (editScope && !editScope.has(id)) continue;
+      if (level >= LEVELS.edit) editable.add(id);
+      if (level >= LEVELS.delete) deletable.add(id);
+    }
+  }
+  const all = addClans.has(null) && visible.size === people.length;
+  return { all: false, everything: all, visible, editable, deletable, addClans };
+}
+
+export const canAddInClan = (perm, clanId) => perm.all || perm.addClans.has(null) || perm.addClans.has(clanId);

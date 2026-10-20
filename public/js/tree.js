@@ -488,6 +488,7 @@ export function drawLayout(root, L, state = {}, on = {}) {
       "card",
       p.gender,
       copy ? "copy" : "",
+      state.guests?.has(p.id) ? "guest" : "",
       p.is_deceased ? "deceased" : "",
       p.id === state.selectedId ? "selected" : "",
       kin.has(p.id) ? "kin" : "",
@@ -547,6 +548,15 @@ export function drawLayout(root, L, state = {}, on = {}) {
       const bg = el("g", { class: `rel-badge kind-${primary.kind}`, transform: `translate(${cw / 2},0)` }, g);
       el("rect", { x: -bw / 2, y: -11, width: bw, height: 21, rx: 10.5 }, bg);
       text(bg, label, { "text-anchor": "middle", dy: "0.35em", direction: "rtl" });
+    }
+    if (state.guests?.has(p.id)) {
+      // from another clan: a tag on the card's left edge
+      const tg = el("g", { class: "clan-tag", transform: `translate(6,${ch - 2})` }, g);
+      const label = `طایفهٔ ${state.guests.get(p.id)}`;
+      const t = text(tg, label, { x: 8, y: 0, dy: "0.32em", "text-anchor": "start", direction: "ltr" });
+      fitText(t, cw / 2);
+      const w = Math.min(cw / 2, (t.getComputedTextLength?.() || label.length * 6) ) + 16;
+      tg.insertBefore(el("rect", { x: 0, y: -8, width: w, height: 16, rx: 8 }), t);
     }
     const marker = L.markers.get(p.id);
     if (marker) {

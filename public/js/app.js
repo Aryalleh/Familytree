@@ -1,8 +1,8 @@
 import { Family, KIND_LABELS } from "./kinship.js";
 import { TreeView, lifeSpan, toFa } from "./tree.js";
 import { prepare, planPages, renderPages, PAPERS } from "./print.js";
-import { generations, branchOf } from "./generations.js";
-import { OfflineError, local, applyOps, editType, queueEdit, replay, describeOp, CHANGES_FORMAT } from "./offline.js";
+import { generations, clanView } from "./generations.js";
+import { OfflineError, isTemp, local, applyOps, editType, queueEdit, replay, describeOp, CHANGES_FORMAT } from "./offline.js";
 
 // ---------------------------------------------------------------------------
 // utilities
@@ -109,8 +109,12 @@ const S = {
   mode: store.get("ft_mode") === "family" ? "family" : "all",
   panelTab: "family",
   gens: new Map(),
-  branch: null,
   access: null,
+  perm: null,
+  clans: [],
+  clanId: undefined, // chosen once the user and their clans are known
+  guests: new Map(),
+  viewFam: new Family([], []),
   genRange: (() => {
     try {
       return JSON.parse(localStorage.getItem("ft_genrange") || "null");
@@ -121,11 +125,15 @@ const S = {
   compareId: null,
 };
 
-const canEdit = () => S.user && (S.user.role === "admin" || S.user.role === "editor");
+/** May this user add or edit anything at all? */
+const canEdit = () => !!S.user && (permAll() || !!S.perm?.editable?.size || !!S.perm?.addClans?.size);
 const isAdmin = () => S.user?.role === "admin";
-/** An editor limited to one branch (the server enforces the same rule). */
-const branchUser = () => !isAdmin() && S.user?.branch_root_id != null;
-const canEditPerson = (id) => canEdit() && (!branchUser() || !!S.branch?.has(id));
+// What this user may do, as computed by the server (generations.js → permissions). People
+// created offline (temporary ids) count as editable until the server decides on replay.
+const permAll = () => isAdmin() || !!S.perm?.all;
+const canEditPerson = (id) => permAll() || !!S.perm?.editable?.has(id) || isTemp(id);
+const canDeletePerson = (id) => permAll() || !!S.perm?.deletable?.has(id) || isTemp(id);
+const canAddInClan = (clanId) => permAll() || !!S.perm?.addClans?.has(null) || !!S.perm?.addClans?.has(clanId);
 const ROLE_FA = { admin: "مدیر", editor: "ویرایشگر", viewer: "بیننده" };
 const STATUS_FA = { married: "متأهل", divorced: "جداشده", widowed: "فوت همسر" };
 
@@ -281,11 +289,12 @@ function renderMain() {
     <div class="shell">
       <header class="topbar">
         <div class="brand"><span class="brand-logo">🌳</span><span class="brand-name">شجره‌نامه خاندان</span></div>
+        <select class="input clan-select" aria-label="طایفه" title="طایفه" hidden></select>
         <nav class="nav">
           <button class="nav-btn active" data-act="map" title="نقشه"><span class="ico">🗺️</span><span class="lbl">نقشه</span></button>
           <button class="nav-btn" data-act="list" title="فهرست افراد"><span class="ico">👥</span><span class="lbl">فهرست افراد</span></button>
           <button class="nav-btn" data-act="finder" title="خویشاوندی"><span class="ico">🔗</span><span class="lbl">خویشاوندی</span></button>
-          ${canEdit() && !branchUser() ? `<button class="nav-btn" data-act="add" title="افزودن شخص"><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>` : ""}
+          <button class="nav-btn" data-act="add" title="افزودن شخص" hidden><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>
           <button class="nav-btn" data-act="sync" title="آفلاین و همگام‌سازی"><span class="ico">☁️</span><span class="lbl">آفلاین</span><span class="net-chip" hidden></span></button>
           <button class="nav-btn" data-act="settings" title="تنظیمات"><span class="ico">🛠️</span><span class="lbl">تنظیمات</span></button>
           ${isAdmin() ? `<button class="nav-btn" data-act="users" title="مدیریت"><span class="ico">⚙️</span><span class="lbl">مدیریت</span></button>` : ""}
@@ -342,6 +351,7 @@ function renderMain() {
   $("[data-act=users]")?.addEventListener("click", () => openAdmin());
   $("[data-act=account]").addEventListener("click", () => openAccount());
   $("[data-act=settings]").addEventListener("click", () => openSettings());
+  $(".clan-select").addEventListener("change", (e) => setClan(e.target.value === "all" ? null : Number(e.target.value)));
   $("[data-act=print]").addEventListener("click", () => openPrintDialog());
   window.addEventListener("beforeprint", () => {
     // Ctrl+P without the print dialog: print the whole tree on one page
@@ -455,12 +465,22 @@ async function loadTree({ fit = false } = {}) {
     S.people = merged.people;
     S.marriages = merged.marriages;
     S.access = data.access || null;
-    // generations from the server (computed on the whole tree); local ones for offline additions
-    S.gens = generations(S.people, S.marriages);
-    for (const p of S.people) if (p.gen) S.gens.set(p.id, p.gen);
-    S.branch = branchUser() ? branchOf(S.user.branch_root_id, S.people, S.marriages) : null;
+    const a = data.access || { all: isAdmin() };
+    S.perm = a.all
+      ? { all: true }
+      : { all: false, editable: new Set(a.editable || []), deletable: new Set(a.deletable || []), addClans: new Set(a.addClans || []) };
+    S.clans = data.clans || S.clans || [];
+    if (S.clanId === undefined) {
+      const saved = store.get(`ft_clan_${S.user.id}`);
+      S.clanId = saved === "all" ? null : saved ? Number(saved) : defaultClan();
+    }
+    if (S.clanId != null && !S.clans.some((c) => c.id === S.clanId)) S.clanId = defaultClan();
+
+
     S.fam = new Family(S.people, S.marriages);
     S.relCache.clear();
+    computeView();
+    updateClanSelect();
     if (S.focusId == null) {
       const saved = Number(store.get(`ft_focus_${S.user.id}`));
       if (saved && person(saved)) S.focusId = saved;
@@ -496,7 +516,7 @@ function familyIds(id) {
 
 /** Close family of `id` for the "خانوادهٔ نزدیک" view. */
 function closeFamily(id) {
-  const f = S.fam;
+  const f = S.viewFam;
   const set = new Set([id]);
   const add = (ids) => ids.forEach((x) => set.add(x));
   const parents = f.parentsOf(id);
@@ -518,9 +538,64 @@ function closeFamily(id) {
   );
 }
 
+/**
+ * The selected clan's tree — its members plus guests (spouses and children from other clans) —
+ * or everyone when "همهٔ طایفه‌ها" is selected. Generations are counted inside that tree.
+ */
+function computeView() {
+  let fam = S.fam;
+  S.guests = new Map();
+  if (S.clanId != null && S.clans.length) {
+    const v = clanView(S.clanId, S.people, S.marriages);
+    const ids = new Set([...v.members, ...v.guests]);
+    for (const id of v.guests) S.guests.set(id, clanName(person(id).clan_id));
+    fam = new Family(
+      S.people.filter((p) => ids.has(p.id)),
+      S.marriages.filter((m) => ids.has(m.husband_id) && ids.has(m.wife_id)),
+    );
+  }
+  S.viewFam = fam;
+  S.gens = generations([...fam.people.values()], fam.marriages);
+}
+
+/** First clan the user may add to, else the one with the most people they can see. */
+function defaultClan() {
+  if (S.clans.length < 2) return null;
+  const addable = S.clans.find((c) => !permAll() && canAddInClan(c.id));
+  if (addable) return addable.id;
+  const counts = new Map();
+  for (const p of S.people) counts.set(p.clan_id, (counts.get(p.clan_id) || 0) + 1);
+  return [...S.clans].sort((a, b) => (counts.get(b.id) || 0) - (counts.get(a.id) || 0))[0].id;
+}
+
+function setClan(id) {
+  S.clanId = id;
+  store.set(`ft_clan_${S.user.id}`, id == null ? "all" : String(id));
+  computeView();
+  if (S.selectedId != null && !S.viewFam.people.has(S.selectedId)) S.selectedId = null;
+  if (S.genRange && S.genRange.from > maxGen()) S.genRange = null;
+  updateClanSelect();
+  updateModeLabel();
+  redraw(true);
+  renderPanel();
+  if (S.selectedId != null) focusFamily(S.selectedId);
+  else S.tree.fit();
+}
+
+function updateClanSelect() {
+  const sel = $(".clan-select");
+  if (sel) {
+    sel.hidden = S.clans.length < 2;
+    sel.innerHTML = `<option value="all">همهٔ طایفه‌ها</option>${S.clans.map((c) => `<option value="${c.id}" ${c.id === S.clanId ? "selected" : ""}>طایفهٔ ${esc(c.name)}</option>`).join("")}`;
+    if (S.clanId == null) sel.value = "all";
+  }
+  const add = $("[data-act=add]");
+  if (add) add.hidden = !(permAll() || S.perm?.addClans?.size);
+}
+
 function shownFamily() {
   const root = S.mode === "family" ? familyRoot() : null;
-  const fam = root != null ? closeFamily(root) : S.fam;
+  const fam = root != null ? closeFamily(root) : S.viewFam;
   const r = S.genRange;
   if (!r) return fam;
   const inRange = (id) => {
@@ -566,7 +641,7 @@ function openGenRange() {
 
 function redraw(relayout = false) {
   const empty = $(".empty");
-  const restricted = S.access && !S.access.all;
+  const restricted = S.access && !S.access.all && !canEdit();
   if (!S.people.length && restricted) {
     empty.hidden = false;
     empty.innerHTML = `<div class="box"><div class="big">🔒</div><h2>هنوز دسترسی ندارید</h2>
@@ -584,7 +659,7 @@ function redraw(relayout = false) {
 
   const kin = new Set(S.selectedId != null && person(S.selectedId) ? familyIds(S.selectedId).slice(1) : []);
   const pr = prefs();
-  const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0 };
+  const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0, guests: S.guests };
   S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation, gens: S.gens });
   renderLegend();
 }
@@ -641,6 +716,11 @@ function renderLegend() {
 }
 
 function selectPerson(id, { focus = true } = {}) {
+  // someone from another clan (a guest, a search hit): open their own clan's tree
+  if (S.clanId != null && !S.viewFam.people.has(id) && person(id)) {
+    S.selectedId = id;
+    return setClan(person(id).clan_id);
+  }
   S.selectedId = id;
   S.selectedUnion = null;
   S.highlight.clear();
@@ -741,8 +821,8 @@ function renderPanel() {
   const spouses = S.fam.spousesOf(p.id);
   const children = S.fam.childrenOf(p.id);
   const editor = canEditPerson(p.id);
-  // a branch editor can't add people above their branch root
-  const upward = editor && !(branchUser() && p.id === S.user.branch_root_id);
+  // parents are added as new people of this clan (or chosen from existing ones)
+  const upward = editor;
   const tab = S.panelTab;
   const span = lifeSpan(p);
 
@@ -781,7 +861,13 @@ function renderPanel() {
       ${p.is_deceased ? `<dt>وفات</dt><dd>${esc(toFa(p.death_date) || "درگذشته")}</dd>` : ""}
       <dt>شناسه</dt><dd>P-${toFa(String(p.id).padStart(4, "0"))}</dd>
     </dl>
-    ${editor ? `<div class="actions"><button class="btn small" data-act="edit">✎ ویرایش</button><button class="btn small danger" data-act="delete">حذف</button></div>` : ""}`;
+    ${
+      editor
+        ? `<div class="actions"><button class="btn small" data-act="edit">✎ ویرایش</button>
+          ${S.clans.length > 1 ? `<button class="btn small" data-act="move">انتقال به طایفهٔ دیگر</button>` : ""}
+          ${canDeletePerson(p.id) ? `<button class="btn small danger" data-act="delete">حذف</button>` : ""}</div>`
+        : ""
+    }`;
 
   const notesTab = p.notes ? `<div class="notes">${esc(p.notes)}</div>` : `<p class="muted">یادداشتی ثبت نشده است.</p>${editor ? `<button class="btn small" data-act="edit">✎ افزودن یادداشت</button>` : ""}`;
 
@@ -798,6 +884,8 @@ function renderPanel() {
           ${span ? `<div class="phero-span">(${esc(span)})</div>` : ""}
           <div class="muted small">P-${toFa(String(p.id).padStart(4, "0"))}</div>
           <span class="gpill ${p.gender}">${p.gender === "male" ? "مرد" : "زن"}</span>
+          ${S.clans.length > 1 ? `<span class="gpill clan">طایفهٔ ${esc(clanName(p.clan_id))}</span>` : ""}
+          ${S.clanId != null && p.clan_id !== S.clanId ? `<div><button class="btn small" data-act="open-clan">↗ نمایش شجره‌نامهٔ طایفهٔ ${esc(clanName(p.clan_id))}</button></div>` : ""}
         </div>
       </div>
       ${
@@ -870,6 +958,8 @@ function renderPanel() {
   $("[data-act=path]", panel)?.addEventListener("click", () => otherId && showPathBetween(p.id, otherId));
   $$("[data-act=edit]", panel).forEach((b) => b.addEventListener("click", () => openPersonForm({ person: p })));
   $("[data-act=delete]", panel)?.addEventListener("click", () => deletePerson(p));
+  $("[data-act=open-clan]", panel)?.addEventListener("click", () => setClan(p.clan_id));
+  $("[data-act=move]", panel)?.addEventListener("click", () => openMoveClan(p));
   $$("[data-add]", panel).forEach((b) => b.addEventListener("click", () => addRelative(p, b.dataset.add)));
 }
 
@@ -1034,6 +1124,15 @@ function personOptions(filter, selected, { none = "— هیچ —" } = {}) {
   );
 }
 
+/** Clan picker for the person form: clans the user may add to, plus the current one. */
+function clanField(p, existing) {
+  if (S.clans.length < 2) return "";
+  const current = existing?.clan_id ?? p.clan_id ?? S.clanId ?? S.clans.find((c) => canAddInClan(c.id))?.id ?? S.clans[0].id;
+  const allowed = S.clans.filter((c) => c.id === current || canAddInClan(c.id));
+  return `<label class="field"><span>طایفه</span><select class="input" name="clan_id">${allowed.map((c) => `<option value="${c.id}" ${c.id === current ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
+    <span class="hint">عروس یا دامادی که از خانوادهٔ دیگری آمده می‌تواند عضو طایفهٔ خودش باشد؛ در این طایفه «مهمان» دیده می‌شود.</span></label>`;
+}
+
 /**
  * Create / edit a person.
  * @param {{person?:any, preset?:any, lockGender?:boolean, title?:string, after?:(p:any)=>Promise<void>}} opts
@@ -1068,6 +1167,7 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
         <label class="field"><span>پدر</span><select class="input" name="father_id">${personOptions((x) => x.gender === "male" && excludeSelf(x), p.father_id)}</select></label>
         <label class="field"><span>مادر</span><select class="input" name="mother_id">${personOptions((x) => x.gender === "female" && excludeSelf(x), p.mother_id)}</select></label>
       </div>
+      ${clanField(p, existing)}
       <label class="field"><span>نشانی عکس (اختیاری)</span><input class="input" name="photo_url" dir="ltr" placeholder="https://…" value="${esc(p.photo_url)}"></label>
       <label class="field"><span>یادداشت</span><textarea class="input" name="notes">${esc(p.notes)}</textarea></label>
       <div class="error"></div>
@@ -1092,6 +1192,7 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
       father_id: fd.get("father_id") || null,
       mother_id: fd.get("mother_id") || null,
       photo_url: fd.get("photo_url"),
+      ...(fd.get("clan_id") ? { clan_id: Number(fd.get("clan_id")) } : {}),
       notes: fd.get("notes"),
     };
     if (preset.spouse_of && !isEdit) data.spouse_of = preset.spouse_of;
@@ -1133,15 +1234,16 @@ function addRelative(p, kind) {
       const spouses = S.fam.spousesOf(p.id);
       const other = spouses.find((s) => s.marriage.status !== "divorced")?.id ?? spouses[0]?.id ?? null;
       const preset = { gender: kind === "son" ? "male" : "female" };
-      if (p.gender === "male") Object.assign(preset, { father_id: p.id, mother_id: other, last_name: p.last_name });
-      else Object.assign(preset, { mother_id: p.id, father_id: other, last_name: other ? person(other).last_name : "" });
+      // children take the father's clan
+      if (p.gender === "male") Object.assign(preset, { father_id: p.id, mother_id: other, last_name: p.last_name, clan_id: p.clan_id });
+      else Object.assign(preset, { mother_id: p.id, father_id: other, last_name: other ? person(other).last_name : "", clan_id: other ? person(other).clan_id : p.clan_id });
       return openPersonForm({ title: `افزودن ${kind === "son" ? "پسر" : "دختر"} برای ${esc(name)}`, preset });
     }
     case "brother":
     case "sister":
       return openPersonForm({
         title: `افزودن ${kind === "brother" ? "برادر" : "خواهر"} برای ${esc(name)}`,
-        preset: { gender: kind === "brother" ? "male" : "female", father_id: p.father_id, mother_id: p.mother_id, last_name: p.last_name },
+        preset: { gender: kind === "brother" ? "male" : "female", father_id: p.father_id, mother_id: p.mother_id, last_name: p.last_name, clan_id: p.clan_id },
       });
     case "spouse":
       return openSpouseForm(p);
@@ -1166,11 +1268,13 @@ function openParentForm(p, male) {
     }
   };
   const candidates = S.people.filter(allowed);
-  if (!candidates.length) return openNewParent();
+  // a brand-new parent needs the right to add people to this clan
+  const canCreate = canAddInClan(p.clan_id);
+  if (!candidates.length) return canCreate ? openNewParent() : toast("اجازهٔ افزودن شخص تازه به این طایفه را ندارید", true);
 
   const { el, close } = modal({
     title: `افزودن ${word} برای ${esc(fullName(p))}`,
-    body: `<div class="tabs"><button class="active" data-tab="existing">از افراد موجود</button><button data-tab="new">شخص تازه</button></div>
+    body: `<div class="tabs"><button class="active" data-tab="existing">از افراد موجود</button>${canCreate ? `<button data-tab="new">شخص تازه</button>` : ""}</div>
       <div data-pane="existing">
         <label class="field"><span>${word}</span><select class="input" name="parent">${personOptions(allowed, suggested, { none: "— انتخاب کنید —" })}</select></label>
         ${suggested ? `<p class="hint">پیشنهاد: همسرِ ${esc(fullName(person(otherParent)))}</p>` : ""}
@@ -1208,7 +1312,7 @@ function openParentForm(p, male) {
   function openNewParent() {
     openPersonForm({
       title: `افزودن ${word} برای ${esc(fullName(p))}`,
-      preset: { gender: male ? "male" : "female", last_name: male ? p.last_name : "" },
+      preset: { gender: male ? "male" : "female", last_name: male ? p.last_name : "", clan_id: p.clan_id },
       lockGender: true,
       after: (np) => link(np.id),
     });
@@ -1252,7 +1356,7 @@ function openSpouseForm(p) {
     };
     if (tab === "new") {
       close();
-      return openPersonForm({ title: `${word} تازه برای ${esc(fullName(p))}`, preset: { gender: spouseGender }, lockGender: true, after: (np) => link(np.id) });
+      return openPersonForm({ title: `${word} تازه برای ${esc(fullName(p))}`, preset: { gender: spouseGender, clan_id: S.clanId ?? p.clan_id }, lockGender: true, after: (np) => link(np.id) });
     }
     const sid = Number($("[name=spouse]", el).value);
     if (!sid) return ($(".error", el).textContent = "یک نفر را انتخاب کنید");
@@ -1297,6 +1401,33 @@ function openMarriageForm(m) {
       await loadTree();
     } catch (e) {
       $(".error", el).textContent = e.message;
+    }
+  });
+}
+
+function openMoveClan(p) {
+  const targets = S.clans.filter((c) => c.id !== p.clan_id && canAddInClan(c.id));
+  if (!targets.length) return toast("طایفهٔ دیگری که اجازهٔ افزودن به آن را داشته باشید نیست", true);
+  const { el, close } = modal({
+    title: `انتقال ${esc(fullName(p))} به طایفهٔ دیگر`,
+    body: `<label class="field"><span>طایفهٔ مقصد</span><select class="input" name="clan">${targets.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></label>
+      <div class="field"><span>همراه با</span>
+        <label class="check"><input type="radio" name="with" value="self" checked> فقط خود این شخص</label>
+        <label class="check"><input type="radio" name="with" value="ancestors"> این شخص و نیاکانش (مثلاً عروسی که خانواده‌اش اشتباهی در این طایفه ثبت شده)</label>
+        <label class="check"><input type="radio" name="with" value="descendants"> این شخص و نوادگانش</label>
+      </div>
+      <p class="hint">فقط کسانی منتقل می‌شوند که در طایفهٔ فعلیِ این شخص هستند و اجازهٔ ویرایششان را دارید.</p>`,
+    foot: `<button class="btn" data-cancel>انصراف</button><button class="btn primary" data-go>انتقال</button>`,
+  });
+  $("[data-cancel]", el).addEventListener("click", close);
+  $("[data-go]", el).addEventListener("click", async () => {
+    try {
+      const res = await api("POST", `/api/people/${p.id}/move`, { clan_id: Number($("[name=clan]", el).value), with: $("[name=with]:checked", el).value });
+      close();
+      toast(`${toFa(res.moved)} نفر منتقل شد`);
+      await loadTree();
+    } catch (e) {
+      toast(e.message, true);
     }
   });
 }
@@ -1360,7 +1491,11 @@ function openAccount() {
   const { el, close } = modal({
     title: "حساب کاربری",
     body: `<p>${esc(S.user.display_name)} — <span dir="ltr">${esc(S.user.username)}</span> <span class="role">${ROLE_FA[S.user.role]}</span></p>
-      <p class="hint">دسترسی شما: ${esc(accessSummary(S.user))}</p>
+      <p class="hint">دسترسی شما: ${
+        permAll()
+          ? "کامل"
+          : `دیدن ${toFa(S.people.length)} نفر، ویرایش ${toFa(S.perm?.editable?.size || 0)} نفر${S.perm?.addClans?.size ? `، افزودن در ${S.perm.addClans.has(null) ? "همهٔ طایفه‌ها" : [...S.perm.addClans].map(clanName).join("، ")}` : ""}`
+      }</p>
       <form id="pw">
         <label class="field"><span>رمز عبور فعلی</span><input class="input" type="password" name="current_password" autocomplete="current-password" dir="ltr"></label>
         <label class="field"><span>رمز عبور تازه</span><input class="input" type="password" name="new_password" autocomplete="new-password" dir="ltr"></label>
@@ -1380,48 +1515,78 @@ function openAccount() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// administration: users, access groups, clans, backup
+
+const LEVEL_FA = { view: "دیدن", edit: "دیدن، افزودن و ویرایش", delete: "دیدن، افزودن، ویرایش و حذف" };
 const ACCESS_HINT =
-  "شاخه = شخص مبنا، همهٔ نوادگانش و همسرانشان. ویرایشگرِ دارای شاخه فقط همان شاخه را ویرایش می‌کند؛ نیاکانِ شخص مبنا همیشه دیده می‌شوند و بقیهٔ شجره‌نامه فقط تا نسلی که تعیین کنید.";
+  "هر دسترسی یعنی: در کدام طایفه، کل طایفه یا شاخهٔ کدام شخص (او، نوادگانش و همسرانشان)، با چه سطحی، تا کدام نسل. نیاکانِ شخص مبنای شاخه همیشه دیده می‌شوند. دسترسی نهایی هر کاربر مجموع دسترسی‌های خودش و گروه‌هایش است.";
 
-function accessSummary(u) {
-  if (u.role === "admin") return "همه‌چیز";
-  const root = u.branch_root_id != null ? person(u.branch_root_id) : null;
-  const g = u.visible_gens;
-  const rest = g == null ? "" : g === 0 ? "بقیه پنهان" : `بقیه تا نسل ${toFa(g)}`;
-  if (u.branch_root_id != null) return [`شاخهٔ ${root ? lineageName(root, 1) : "؟"}`, rest || "بقیه: همه"].join(" · ");
-  return g == null ? "کل شجره‌نامه" : g === 0 ? "هیچ (منتظر تعیین دسترسی)" : `تا نسل ${toFa(g)}`;
+function clanName(id) {
+  return S.clans.find((c) => c.id === id)?.name || "؟";
 }
 
-function accessFields(u) {
+function grantText(g) {
+  const where = g.root_id != null ? `شاخهٔ ${person(g.root_id) ? lineageName(person(g.root_id), 1) : "؟"}` : g.clan_id != null ? `کل طایفهٔ ${clanName(g.clan_id)}` : "همهٔ طایفه‌ها";
+  return `${where} · ${LEVEL_FA[g.level]}${g.max_gen ? ` · تا نسل ${toFa(g.max_gen)}` : ""}`;
+}
+
+/** Editable list of grants: clan · whole clan or a branch · level · down to generation. */
+function grantsEditor(container, grants) {
   const n = maxGen();
-  const g = u.visible_gens;
-  return `
-    <label class="field"><span>شاخهٔ کاربر (شخص مبنا)</span>
-      <select class="input" name="branch_root_id">${personOptions(() => true, u.branch_root_id ?? null, { none: "— کل شجره‌نامه —" })}</select></label>
-    <label class="field"><span>دیدن شاخه‌های دیگر تا نسل</span>
-      <select class="input" name="visible_gens">
-        <option value="" ${g == null ? "selected" : ""}>همهٔ نسل‌ها</option>
-        <option value="0" ${g === 0 ? "selected" : ""}>هیچ (فقط شاخهٔ خودش)</option>
-        ${Array.from({ length: n }, (_, i) => `<option value="${i + 1}" ${g === i + 1 ? "selected" : ""}>تا نسل ${toFa(i + 1)}</option>`).join("")}
-      </select></label>`;
+  const row = (g = { clan_id: S.clanId ?? null, root_id: null, level: "view", max_gen: null }) => {
+    const div = document.createElement("div");
+    div.className = "grant-row";
+    div.innerHTML = `
+      <select class="input" data-f="clan"><option value="">همهٔ طایفه‌ها</option>${S.clans.map((c) => `<option value="${c.id}" ${g.clan_id === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
+      <select class="input" data-f="root"></select>
+      <select class="input" data-f="level">${Object.entries(LEVEL_FA).map(([k, v]) => `<option value="${k}" ${g.level === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <select class="input" data-f="gen"><option value="">همهٔ نسل‌ها</option>${Array.from({ length: n }, (_, i) => `<option value="${i + 1}" ${g.max_gen === i + 1 ? "selected" : ""}>تا نسل ${toFa(i + 1)}</option>`).join("")}</select>
+      <button class="btn small danger" type="button" data-f="del" title="حذف">✕</button>`;
+    const clanSel = $("[data-f=clan]", div);
+    const rootSel = $("[data-f=root]", div);
+    const fillRoots = (selected) => {
+      const clan = clanSel.value ? Number(clanSel.value) : null;
+      rootSel.innerHTML = personOptions((p) => clan == null || p.clan_id === clan, selected, { none: clan == null ? "— کل شجره‌نامه —" : "— کل طایفه —" });
+      for (const o of rootSel.options) if (o.value) o.textContent = `شاخهٔ ${o.textContent}`;
+    };
+    fillRoots(g.root_id);
+    clanSel.addEventListener("change", () => fillRoots(null));
+    $("[data-f=del]", div).addEventListener("click", () => div.remove());
+    return div;
+  };
+  container.innerHTML = `<div class="grant-list"></div><button class="btn small" type="button" data-add-grant>＋ افزودن دسترسی</button>`;
+  const list = $(".grant-list", container);
+  for (const g of grants) list.appendChild(row(g));
+  $("[data-add-grant]", container).addEventListener("click", () => list.appendChild(row()));
+  return () =>
+    $$(".grant-row", list).map((r) => ({
+      clan_id: $("[data-f=clan]", r).value ? Number($("[data-f=clan]", r).value) : null,
+      root_id: $("[data-f=root]", r).value ? Number($("[data-f=root]", r).value) : null,
+      level: $("[data-f=level]", r).value,
+      max_gen: $("[data-f=gen]", r).value ? Number($("[data-f=gen]", r).value) : null,
+    }));
 }
 
-function readAccess(el) {
-  const root = $("[name=branch_root_id]", el).value;
-  const g = $("[name=visible_gens]", el).value;
-  return { branch_root_id: root ? Number(root) : null, visible_gens: g === "" ? null : Number(g) };
-}
-
-function openAccessForm(u, done) {
+function openUserAccess(u, groups, done) {
   const { el, close } = modal({
     title: `دسترسی ${esc(u.display_name || u.username)}`,
-    body: `${accessFields(u)}<p class="hint">${ACCESS_HINT}</p><div class="error"></div>`,
+    wide: true,
+    body: `
+      <div class="section-title" style="border:0;margin-top:0;padding-top:0">گروه‌های دسترسی</div>
+      ${groups.length ? `<div class="chips">${groups.map((g) => `<label class="check chip-check"><input type="checkbox" value="${g.id}" ${u.groups.includes(g.id) ? "checked" : ""}> ${esc(g.name)}</label>`).join("")}</div>` : `<p class="muted">هنوز گروهی ساخته نشده است.</p>`}
+      <div class="section-title">دسترسی‌های اختصاصی این کاربر</div>
+      <div data-grants></div>
+      <p class="hint">${ACCESS_HINT}</p>
+      <div class="error"></div>`,
     foot: `<button class="btn" data-cancel>انصراف</button><button class="btn primary" data-save>ذخیره</button>`,
   });
+  const read = grantsEditor($("[data-grants]", el), u.grants);
   $("[data-cancel]", el).addEventListener("click", close);
   $("[data-save]", el).addEventListener("click", async () => {
     try {
-      await api("PUT", `/api/users/${u.id}`, readAccess(el));
+      const groupIds = $$(".chip-check input:checked", el).map((i) => Number(i.value));
+      await api("PUT", `/api/users/${u.id}/access`, { groups: groupIds, grants: read() });
       close();
       toast("دسترسی ذخیره شد");
       done?.();
@@ -1431,47 +1596,125 @@ function openAccessForm(u, done) {
   });
 }
 
-async function openAdmin() {
+function openGroupForm(g, users, done) {
+  const isNew = !g;
+  g ||= { name: "", description: "", members: [], grants: [] };
+  const { el, close } = modal({
+    title: isNew ? "گروه دسترسی تازه" : `گروه «${esc(g.name)}»`,
+    wide: true,
+    body: `
+      <div class="row">
+        <label class="field"><span>نام گروه</span><input class="input" name="name" value="${esc(g.name)}" placeholder="مثلاً ویرایشگران طایفهٔ رحیمی"></label>
+        <label class="field"><span>توضیح</span><input class="input" name="description" value="${esc(g.description)}"></label>
+      </div>
+      <div class="section-title">دسترسی‌های گروه</div>
+      <div data-grants></div>
+      <div class="section-title">اعضا</div>
+      <div class="chips">${users.filter((u) => u.role !== "admin").map((u) => `<label class="check chip-check"><input type="checkbox" value="${u.id}" ${g.members.includes(u.id) ? "checked" : ""}> ${esc(u.display_name || u.username)}</label>`).join("") || `<span class="muted">کاربری نیست</span>`}</div>
+      <p class="hint">${ACCESS_HINT}</p>
+      <div class="error"></div>`,
+    foot: `${isNew ? "" : `<button class="btn danger" data-del>حذف گروه</button>`}<span class="spacer"></span><button class="btn" data-cancel>انصراف</button><button class="btn primary" data-save>ذخیره</button>`,
+  });
+  const read = grantsEditor($("[data-grants]", el), g.grants);
+  $("[data-cancel]", el).addEventListener("click", close);
+  $("[data-del]", el)?.addEventListener("click", async () => {
+    if (!confirm("این گروه حذف شود؟ اعضا دسترسی‌های این گروه را از دست می‌دهند.")) return;
+    await api("DELETE", `/api/groups/${g.id}`).then(() => (close(), done?.()), (e) => toast(e.message, true));
+  });
+  $("[data-save]", el).addEventListener("click", async () => {
+    const data = {
+      name: $("[name=name]", el).value,
+      description: $("[name=description]", el).value,
+      grants: read(),
+      members: $$(".chip-check input:checked", el).map((i) => Number(i.value)),
+    };
+    try {
+      await (isNew ? api("POST", "/api/groups", data) : api("PUT", `/api/groups/${g.id}`, data));
+      close();
+      toast("گروه ذخیره شد");
+      done?.();
+    } catch (e) {
+      $(".error", el).textContent = e.message;
+    }
+  });
+}
+
+async function openAdmin(tab = "users") {
   let data;
+  let acc;
   try {
-    data = await api("GET", "/api/users");
+    [data, acc] = await Promise.all([api("GET", "/api/users"), api("GET", "/api/access")]);
   } catch (e) {
     return toast(e.message, true);
   }
+  const reopen = (t) => () => openAdmin(t);
+  const counts = new Map();
+  for (const p of S.people) counts.set(p.clan_id, (counts.get(p.clan_id) || 0) + 1);
   const { el, close } = modal({
     title: "مدیریت",
     wide: true,
     body: `
-      <div class="tabs"><button class="active" data-tab="users">کاربران</button><button data-tab="backup">پشتیبان‌گیری</button></div>
+      <div class="tabs">
+        <button data-tab="users">کاربران</button><button data-tab="groups">گروه‌های دسترسی</button>
+        <button data-tab="clans">طایفه‌ها</button><button data-tab="backup">پشتیبان‌گیری</button>
+      </div>
       <div data-pane="users">
-        <label class="check"><input type="checkbox" name="allow_registration" ${data.allowRegistration ? "checked" : ""}> ثبت‌نام عمومی آزاد باشد (کاربران تازه «بیننده» می‌شوند)</label>
-        <table class="users">
+        <label class="check"><input type="checkbox" name="allow_registration" ${data.allowRegistration ? "checked" : ""}> ثبت‌نام عمومی آزاد باشد (کاربر تازه تا وقتی دسترسی نگیرد چیزی نمی‌بیند)</label>
+        <div class="table-wrap"><table class="users">
           <thead><tr><th>نام</th><th>نام کاربری</th><th>نقش</th><th>دسترسی</th><th></th></tr></thead>
-          <tbody>${data.users
-            .map(
-              (u) => `<tr data-uid="${u.id}">
+          <tbody>${acc.users
+            .map((u) => {
+              const summary =
+                u.role === "admin"
+                  ? "همه‌چیز"
+                  : [...u.groups.map((gid) => `گروه ${acc.groups.find((g) => g.id === gid)?.name || "؟"}`), ...u.grants.map(grantText)].join("؛ ") || "بدون دسترسی";
+              return `<tr data-uid="${u.id}">
               <td>${esc(u.display_name)}</td><td dir="ltr">${esc(u.username)}</td>
-              <td><select class="input" data-role ${u.id === S.user.id ? "disabled" : ""}>${Object.entries(ROLE_FA).map(([k, v]) => `<option value="${k}" ${u.role === k ? "selected" : ""}>${v}</option>`).join("")}</select></td>
-              <td class="access-cell">${esc(accessSummary(u))} ${u.role !== "admin" ? `<button class="btn small" data-access>تعیین</button>` : ""}</td>
+              <td><select class="input" data-role ${u.id === S.user.id ? "disabled" : ""}>
+                <option value="admin" ${u.role === "admin" ? "selected" : ""}>مدیر</option>
+                <option value="viewer" ${u.role !== "admin" ? "selected" : ""}>کاربر</option></select></td>
+              <td class="access-cell">${esc(summary)} ${u.role !== "admin" ? `<button class="btn small" data-access>تعیین</button>` : ""}</td>
               <td><button class="btn small" data-reset>رمز تازه</button> ${u.id !== S.user.id ? `<button class="btn small danger" data-del>حذف</button>` : ""}</td>
-            </tr>`,
-            )
+            </tr>`;
+            })
             .join("")}</tbody>
-        </table>
+        </table></div>
         <div class="section-title">کاربر تازه</div>
         <form id="nu" class="row" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
           <label class="field"><span>نام نمایشی</span><input class="input" name="display_name"></label>
           <label class="field"><span>نام کاربری</span><input class="input" name="username" dir="ltr"></label>
           <label class="field"><span>رمز عبور</span><input class="input" name="password" type="password" dir="ltr" autocomplete="new-password"></label>
-          <label class="field"><span>نقش</span><select class="input" name="role">${Object.entries(ROLE_FA).map(([k, v]) => `<option value="${k}" ${k === "viewer" ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+          <label class="field"><span>نقش</span><select class="input" name="role"><option value="viewer">کاربر</option><option value="admin">مدیر</option></select></label>
         </form>
-        <div class="row">${accessFields({})}</div>
         <div class="error"></div>
-        <button class="btn primary" data-create>ساخت کاربر</button>
-        <p class="hint">مدیر: همه‌چیز · ویرایشگر: افزودن و ویرایش اشخاص · بیننده: فقط دیدن.<br>${ACCESS_HINT}</p>
+        <button class="btn primary" data-create>ساخت کاربر و تعیین دسترسی</button>
+        <p class="hint">مدیر همه‌چیز را می‌بیند و ویرایش می‌کند. هر کاربر دیگر فقط به اندازهٔ دسترسی‌هایش (و گروه‌هایش) می‌بیند و ویرایش می‌کند.</p>
+      </div>
+      <div data-pane="groups" hidden>
+        <p class="hint">دسترسی‌ها را دسته‌بندی کنید: مثلاً «ویرایشگران طایفهٔ رحیمی» یا «خانوادهٔ حسن — فقط دیدن»، و کاربران را عضو گروه‌ها کنید.</p>
+        ${
+          acc.groups.length
+            ? `<div class="table-wrap"><table class="users"><thead><tr><th>گروه</th><th>دسترسی‌ها</th><th>اعضا</th><th></th></tr></thead><tbody>${acc.groups
+                .map(
+                  (g) => `<tr data-gid="${g.id}"><td><b>${esc(g.name)}</b>${g.description ? `<div class="muted small">${esc(g.description)}</div>` : ""}</td>
+                  <td class="access-cell">${esc(g.grants.map(grantText).join("؛ ") || "—")}</td>
+                  <td>${toFa(g.members.length)}</td><td><button class="btn small" data-edit-group>ویرایش</button></td></tr>`,
+                )
+                .join("")}</tbody></table></div>`
+            : `<p class="muted">هنوز گروهی ساخته نشده است.</p>`
+        }
+        <button class="btn primary" data-new-group>＋ گروه تازه</button>
+      </div>
+      <div data-pane="clans" hidden>
+        <p class="hint">هر طایفه درخت جداگانه‌ای است. عروس‌ها و دامادها می‌توانند عضو طایفهٔ خودشان باشند و شجره‌نامهٔ خانوادهٔ خودشان را داشته باشند؛ در درخت طایفهٔ همسرشان به‌صورت «مهمان» دیده می‌شوند.</p>
+        <div class="table-wrap"><table class="users"><thead><tr><th>طایفه</th><th>اعضا</th><th></th></tr></thead><tbody>
+          ${S.clans.map((c) => `<tr data-cid="${c.id}"><td><input class="input" data-cname value="${esc(c.name)}"></td><td>${toFa(counts.get(c.id) || 0)}</td>
+            <td><button class="btn small" data-csave>ذخیره</button> <button class="btn small danger" data-cdel ${counts.get(c.id) ? "disabled" : ""}>حذف</button></td></tr>`).join("")}
+        </tbody></table></div>
+        <div class="actions"><input class="input" data-new-clan placeholder="نام طایفهٔ تازه" style="max-width:260px"><button class="btn primary" data-add-clan>＋ افزودن طایفه</button></div>
       </div>
       <div data-pane="backup" hidden>
-        <p>از کل شجره‌نامه (اشخاص و ازدواج‌ها) فایل JSON بگیرید یا آن را بازیابی کنید.</p>
+        <p>از کل شجره‌نامه (طایفه‌ها، اشخاص و ازدواج‌ها) فایل JSON بگیرید یا آن را بازیابی کنید.</p>
         <div class="actions">
           <a class="btn" href="/api/export" download>⬇ دریافت فایل پشتیبان</a>
           <label class="btn">⬆ بازیابی از فایل<input type="file" accept="application/json,.json" hidden data-import></label>
@@ -1479,39 +1722,67 @@ async function openAdmin() {
         <p class="hint">هشدار: بازیابی، همهٔ داده‌های فعلی شجره‌نامه را جایگزین می‌کند.</p>
       </div>`,
   });
-  $$("[data-tab]", el).forEach((b) =>
-    b.addEventListener("click", () => {
-      $$("[data-tab]", el).forEach((x) => x.classList.toggle("active", x === b));
-      $$("[data-pane]", el).forEach((x) => (x.hidden = x.dataset.pane !== b.dataset.tab));
-    }),
-  );
+  const showTab = (t) => {
+    $$("[data-tab]", el).forEach((x) => x.classList.toggle("active", x.dataset.tab === t));
+    $$("[data-pane]", el).forEach((x) => (x.hidden = x.dataset.pane !== t));
+  };
+  showTab(tab);
+  $$("[data-tab]", el).forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
   const fail = (e) => toast(e.message, true);
   $("[name=allow_registration]", el).addEventListener("change", (e) =>
     api("PUT", "/api/settings", { allow_registration: e.target.checked }).then(() => toast("ذخیره شد"), fail),
   );
   $$("tr[data-uid]", el).forEach((tr) => {
     const id = tr.dataset.uid;
-    $("[data-role]", tr).addEventListener("change", (e) => api("PUT", `/api/users/${id}`, { role: e.target.value }).then(() => toast("نقش تغییر کرد"), fail));
-    $("[data-access]", tr)?.addEventListener("click", () => {
-      const u = data.users.find((x) => String(x.id) === id);
-      openAccessForm(u, () => (close(), openAdmin()));
-    });
+    const u = acc.users.find((x) => String(x.id) === id);
+    $("[data-role]", tr).addEventListener("change", (e) => api("PUT", `/api/users/${id}`, { role: e.target.value }).then(() => (close(), openAdmin("users")), fail));
+    $("[data-access]", tr)?.addEventListener("click", () => openUserAccess(u, acc.groups, () => (close(), openAdmin("users"))));
     $("[data-reset]", tr).addEventListener("click", () => {
       const pw = prompt("رمز عبور تازه (دست‌کم ۸ نویسه):");
       if (pw) api("PUT", `/api/users/${id}`, { password: pw }).then(() => toast("رمز تغییر کرد"), fail);
     });
     $("[data-del]", tr)?.addEventListener("click", () => {
-      if (confirm("این کاربر حذف شود؟")) api("DELETE", `/api/users/${id}`).then(() => (close(), openAdmin()), fail);
+      if (confirm("این کاربر حذف شود؟")) api("DELETE", `/api/users/${id}`).then(() => (close(), openAdmin("users")), fail);
     });
   });
   $("[data-create]", el).addEventListener("click", async () => {
     try {
-      await api("POST", "/api/users", { ...Object.fromEntries(new FormData($("#nu", el))), ...readAccess(el) });
+      const form = Object.fromEntries(new FormData($("#nu", el)));
+      const res = await api("POST", "/api/users", form);
       close();
-      toast("کاربر ساخته شد");
-      openAdmin();
+      toast("کاربر ساخته شد؛ حالا دسترسی‌اش را تعیین کنید");
+      if (form.role !== "admin") {
+        openUserAccess({ id: res.id, username: form.username, display_name: form.display_name, groups: [], grants: [] }, acc.groups, reopen("users"));
+      } else openAdmin("users");
     } catch (e) {
       $("[data-pane=users] > .error", el).textContent = e.message;
+    }
+  });
+  $("[data-new-group]", el).addEventListener("click", () => openGroupForm(null, acc.users, () => (close(), openAdmin("groups"))));
+  $$("tr[data-gid]", el).forEach((tr) =>
+    $("[data-edit-group]", tr).addEventListener("click", () =>
+      openGroupForm(acc.groups.find((g) => String(g.id) === tr.dataset.gid), acc.users, () => (close(), openAdmin("groups"))),
+    ),
+  );
+  $$("tr[data-cid]", el).forEach((tr) => {
+    const id = tr.dataset.cid;
+    $("[data-csave]", tr).addEventListener("click", () =>
+      api("PUT", `/api/clans/${id}`, { name: $("[data-cname]", tr).value }).then(async () => (toast("ذخیره شد"), await loadTree()), fail),
+    );
+    $("[data-cdel]", tr).addEventListener("click", () => {
+      if (confirm("این طایفه حذف شود؟")) api("DELETE", `/api/clans/${id}`).then(async () => (close(), await loadTree(), openAdmin("clans")), fail);
+    });
+  });
+  $("[data-add-clan]", el).addEventListener("click", async () => {
+    const name = $("[data-new-clan]", el).value.trim();
+    if (!name) return;
+    try {
+      await api("POST", "/api/clans", { name });
+      close();
+      await loadTree();
+      openAdmin("clans");
+    } catch (e) {
+      fail(e);
     }
   });
   $("[data-import]", el).addEventListener("change", async (e) => {
@@ -1730,8 +2001,8 @@ let printPrep = null;
 function buildPrint(opts) {
   const orientation = opts.orientation || prefs().orientation;
   const notes = opts.notes || "list";
-  if (!printPrep || printPrep.fam !== S.fam || printPrep.orientation !== orientation || printPrep.notesMode !== notes) {
-    printPrep = { ...prepare(S.fam, { orientation, notes, gens: S.gens }), fam: S.fam, notesMode: notes };
+  if (!printPrep || printPrep.fam !== S.viewFam || printPrep.orientation !== orientation || printPrep.notesMode !== notes) {
+    printPrep = { ...prepare(S.viewFam, { orientation, notes, gens: S.gens }), fam: S.viewFam, notesMode: notes };
   }
   const plan = planPages(printPrep, { ...opts, to: Math.min(opts.to, printPrep.generations) });
   renderPages($("#print-root"), plan, printPrep, { title: "شجره‌نامه خاندان", legendHtml: PRINT_LEGEND });

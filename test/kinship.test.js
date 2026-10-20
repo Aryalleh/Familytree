@@ -112,3 +112,31 @@ test("branch access: own branch + lineage, others down to a generation", () => {
   const v = access({ role: "viewer", branch_root_id: 999, visible_gens: null }, people, marriages);
   assert.equal(v.visible.size, 0, "missing branch root shows nothing");
 });
+
+import { permissions, clanView } from "../public/js/generations.js";
+
+test("clans and grants", () => {
+  // put Maryam (6), her sister Leila (13), Javad (14) and their parents (15, 16) in clan 2
+  const P2 = people.map((p) => ({ ...p, clan_id: [6, 13, 14, 15, 16].includes(p.id) ? 2 : 1 }));
+  const v = clanView(2, P2, marriages);
+  assert.deepEqual([...v.members].sort((a, b) => a - b), [6, 13, 14, 15, 16]);
+  assert.ok(v.guests.has(3) && v.guests.has(7), "Maryam's husband and son are guests of clan 2");
+
+  const viewClan2 = permissions({ role: "viewer" }, P2, marriages, [{ clan_id: 2, root_id: null, level: "view", max_gen: null }]);
+  assert.ok(viewClan2.visible.has(15) && viewClan2.visible.has(3) && !viewClan2.visible.has(1));
+  assert.equal(viewClan2.editable.size, 0);
+
+  // edit Hossein's branch, view clan 1 down to its 2nd generation
+  const p = permissions({ role: "viewer" }, P2, marriages, [
+    { clan_id: null, root_id: 4, level: "edit", max_gen: null },
+    { clan_id: 1, root_id: null, level: "view", max_gen: 2 },
+  ]);
+  assert.ok(p.editable.has(9) && !p.editable.has(3));
+  assert.ok(p.visible.has(3) && !p.visible.has(11));
+  assert.equal(p.deletable.size, 0);
+  assert.ok(!p.addClans.has(1));
+
+  const full = permissions({ role: "viewer" }, P2, marriages, [{ clan_id: 1, root_id: null, level: "delete", max_gen: null }]);
+  assert.ok(full.addClans.has(1) && full.deletable.has(1) && !full.visible.has(15));
+  assert.ok(full.visible.has(6) && !full.editable.has(6), "a guest from clan 2 is visible but not editable");
+});
