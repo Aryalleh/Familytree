@@ -11,6 +11,8 @@ export interface User {
   display_name: string;
   role: Role;
   prefs?: string;
+  branch_root_id?: number | null;
+  visible_gens?: number | null;
 }
 
 export interface Person {

@@ -66,7 +66,7 @@ function orderBlock(members, adj) {
  * @param {import('./kinship.js').Family} fam  people to draw
  * @param {import('./kinship.js').Family} full the whole family (for consanguinity)
  */
-export function buildModel(fam, full = fam, { duplicates = false } = {}) {
+export function buildModel(fam, full = fam, { duplicates = false, gens = null } = {}) {
   const has = (id) => id != null && fam.people.has(id);
 
   const couples = new Map();
@@ -148,7 +148,15 @@ export function buildModel(fam, full = fam, { duplicates = false } = {}) {
       if (!parentBlocks.get(dst).includes(src)) parentBlocks.get(dst).push(src);
     }
   }
-  return { fam, unions, blocks, blockOf, markers, childBlocks, parentBlocks, genOf: new Map() };
+  // generation of each block (from generations.js) for the row labels and print ranges
+  const genOf = new Map();
+  if (gens) {
+    for (const b of blocks) {
+      const g = Math.min(...b.members.map((id) => gens.get(Math.abs(id)) ?? Infinity));
+      if (Number.isFinite(g)) genOf.set(b.key, g);
+    }
+  }
+  return { fam, unions, blocks, blockOf, markers, childBlocks, parentBlocks, genOf };
 }
 
 /**
@@ -586,9 +594,9 @@ export class TreeView {
    * @param {import('./kinship.js').Family} fam   people to draw
    * @param {import('./kinship.js').Family} full  whole family
    */
-  render(fam, full, state, { relayout = true, orientation = "vertical" } = {}) {
+  render(fam, full, state, { relayout = true, orientation = "vertical", gens = null } = {}) {
     if (relayout || !this.layout) {
-      this.layout = layoutTree(fam, full, { orientation, cardH: cardHeight(state.noteLines) });
+      this.layout = layoutTree(fam, full, { orientation, cardH: cardHeight(state.noteLines), gens });
     }
     drawLayout(this.viewport, this.layout, { ...state, defs: this.defs }, {
       person: (id) => this.opts.onSelectPerson(id),

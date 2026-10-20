@@ -10,6 +10,8 @@ import {
   verifyPassword,
 } from "./auth";
 import { HttpError, type Env, type Marriage, type Person, type Role, type User } from "./types";
+// shared with the browser, so both sides agree on generations and branches
+import { access } from "../public/js/generations.js";
 
 type Ctx = { env: Env; request: Request; url: URL; user: User | null; params: string[] };
 type Handler = (ctx: Ctx) => Promise<Response>;
@@ -115,14 +117,15 @@ const register: Handler = async ({ env, request, url }) => {
   const displayName = str(b.display_name, 100) || username;
   validateCredentials(username, password);
   const res = await env.DB.prepare(
-    `INSERT INTO users (username, display_name, password_hash, role)
-     SELECT ?, ?, ?, 'viewer' WHERE EXISTS (SELECT 1 FROM users)
+    // self-registered accounts see nothing until an admin sets their access
+    `INSERT INTO users (username, display_name, password_hash, role, visible_gens)
+     SELECT ?, ?, ?, 'viewer', 0 WHERE EXISTS (SELECT 1 FROM users)
      ON CONFLICT(username) DO NOTHING`,
   )
     .bind(username, displayName, await hashPassword(password))
     .run();
   if (!res.meta.changes) throw new HttpError(409, "این نام کاربری قبلاً گرفته شده است");
-  const user: User = { id: Number(res.meta.last_row_id), username, display_name: displayName, role: "viewer" };
+  const user: User = { id: Number(res.meta.last_row_id), username, display_name: displayName, role: "viewer", visible_gens: 0 };
   return loginResponse(env, url, user, 201);
 };
 
@@ -130,7 +133,7 @@ const login: Handler = async ({ env, request, url }) => {
   const b = await body(request);
   const username = str(b.username, 32);
   const password = String(b.password ?? "");
-  const row = await env.DB.prepare("SELECT id, username, display_name, role, prefs, password_hash FROM users WHERE username = ?")
+  const row = await env.DB.prepare("SELECT id, username, display_name, role, prefs, branch_root_id, visible_gens, password_hash FROM users WHERE username = ?")
     .bind(username)
     .first<User & { password_hash: string }>();
   if (!row || !(await verifyPassword(password, row.password_hash))) {
@@ -175,13 +178,27 @@ const changePassword: Handler = async ({ env, request, user }) => {
 
 const listUsers: Handler = async ({ env, user }) => {
   require(user, "admin");
-  const { results } = await env.DB.prepare("SELECT id, username, display_name, role, created_at FROM users ORDER BY id").all();
+  const { results } = await env.DB.prepare("SELECT id, username, display_name, role, branch_root_id, visible_gens, created_at FROM users ORDER BY id").all();
   return json({ users: results, allowRegistration: await registrationOpen(env) });
 };
 
 function parseRole(v: unknown): Role {
   if (!ROLES.includes(v as Role)) throw new HttpError(400, "نقش نامعتبر است");
   return v as Role;
+}
+
+/** branch_root_id / visible_gens from a request: null = no restriction. */
+async function parseAccess(env: Env, b: Record<string, unknown>) {
+  const root = optId(b.branch_root_id);
+  if (root && !(await env.DB.prepare("SELECT 1 FROM people WHERE id = ?").bind(root).first())) {
+    throw new HttpError(400, "شخصِ مبنای شاخه وجود ندارد");
+  }
+  let gens: number | null = null;
+  if (b.visible_gens !== undefined && b.visible_gens !== null && b.visible_gens !== "") {
+    gens = Number(b.visible_gens);
+    if (!Number.isInteger(gens) || gens < 0 || gens > 200) throw new HttpError(400, "تعداد نسل نامعتبر است");
+  }
+  return { root, gens };
 }
 
 const createUser: Handler = async ({ env, request, user }) => {
@@ -191,10 +208,12 @@ const createUser: Handler = async ({ env, request, user }) => {
   const password = String(b.password ?? "");
   validateCredentials(username, password);
   const role = parseRole(b.role ?? "viewer");
+  const acc = await parseAccess(env, b);
   const res = await env.DB.prepare(
-    "INSERT INTO users (username, display_name, password_hash, role) VALUES (?, ?, ?, ?) ON CONFLICT(username) DO NOTHING",
+    `INSERT INTO users (username, display_name, password_hash, role, branch_root_id, visible_gens) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(username) DO NOTHING`,
   )
-    .bind(username, str(b.display_name, 100) || username, await hashPassword(password), role)
+    .bind(username, str(b.display_name, 100) || username, await hashPassword(password), role, acc.root, acc.gens)
     .run();
   if (!res.meta.changes) throw new HttpError(409, "این نام کاربری قبلاً گرفته شده است");
   return json({ id: res.meta.last_row_id }, 201);
@@ -221,6 +240,10 @@ const updateUser: Handler = async ({ env, request, user, params }) => {
   }
   if (b.display_name !== undefined) {
     stmts.push(env.DB.prepare("UPDATE users SET display_name = ? WHERE id = ?").bind(str(b.display_name, 100), id));
+  }
+  if (b.branch_root_id !== undefined || b.visible_gens !== undefined) {
+    const acc = await parseAccess(env, b);
+    stmts.push(env.DB.prepare("UPDATE users SET branch_root_id = ?, visible_gens = ? WHERE id = ?").bind(acc.root, acc.gens, id));
   }
   if (b.password) {
     const pw = String(b.password);
@@ -258,11 +281,6 @@ const updateSettings: Handler = async ({ env, request, user }) => {
 
 const PERSON_COLS =
   "id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id";
-
-async function loadPeople(env: Env): Promise<Map<number, Person>> {
-  const { results } = await env.DB.prepare(`SELECT ${PERSON_COLS} FROM people`).all<Person>();
-  return new Map(results.map((p) => [p.id, p]));
-}
 
 function isAncestor(people: Map<number, Person>, ancestorId: number, personId: number): boolean {
   const stack = [personId];
@@ -322,20 +340,58 @@ function checkParents(people: Map<number, Person>, p: PersonInput, selfId?: numb
   }
 }
 
-const getTree: Handler = async ({ env, user }) => {
-  require(user, "viewer");
-  const [people, marriages] = await env.DB.batch([
+type Access = ReturnType<typeof access>;
+
+/** Everything plus what this user may see and edit (see public/js/generations.js). */
+async function loadScoped(env: Env, user: User) {
+  const [pr, mr] = await env.DB.batch([
     env.DB.prepare(`SELECT ${PERSON_COLS} FROM people ORDER BY id`),
     env.DB.prepare("SELECT id, husband_id, wife_id, status, marriage_date, end_date, notes FROM marriages ORDER BY id"),
   ]);
-  return json({ people: people.results, marriages: marriages.results });
+  const people = pr.results as unknown as Person[];
+  const marriages = mr.results as unknown as Marriage[];
+  const acc: Access = access(user, people, marriages);
+  return { people: new Map(people.map((p) => [p.id, p])), list: people, marriages, acc };
+}
+
+const canSee = (acc: Access, id: number | null) => id != null && (!acc.visible || acc.visible.has(id));
+const canChange = (acc: Access, id: number | null) => id != null && (!acc.editable || acc.editable.has(id));
+const NOT_YOURS = "این شخص در محدودهٔ ویرایش شما نیست";
+
+/** Parents/spouses named in an edit must be people the user can see. */
+function requireVisible(acc: Access, ids: (number | null)[]) {
+  for (const id of ids) if (id != null && !canSee(acc, id)) throw new HttpError(400, "شخص انتخاب‌شده وجود ندارد");
+}
+
+const getTree: Handler = async ({ env, user }) => {
+  const me = require(user, "viewer");
+  const { list, marriages, acc } = await loadScoped(env, me);
+  const people = list
+    .filter((p) => canSee(acc, p.id))
+    .map((p) => ({
+      ...p,
+      gen: acc.gens.get(p.id),
+      // don't reveal links to people this user may not see
+      father_id: canSee(acc, p.father_id) ? p.father_id : null,
+      mother_id: canSee(acc, p.mother_id) ? p.mother_id : null,
+    }));
+  return json({
+    people,
+    marriages: marriages.filter((m) => canSee(acc, m.husband_id) && canSee(acc, m.wife_id)),
+    access: { all: acc.all, branch_root_id: me.branch_root_id ?? null, visible_gens: me.visible_gens ?? null },
+  });
 };
 
 const createPerson: Handler = async ({ env, request, user }) => {
-  require(user, "editor");
+  const me = require(user, "editor");
   const b = await body(request);
   const p = parsePerson(b);
-  const people = await loadPeople(env);
+  const { people, acc } = await loadScoped(env, me);
+  const spouseOfId = optId(b.spouse_of);
+  requireVisible(acc, [p.father_id, p.mother_id, spouseOfId]);
+  if (me.branch_root_id != null && !(canChange(acc, p.father_id) || canChange(acc, p.mother_id) || canChange(acc, spouseOfId))) {
+    throw new HttpError(403, "فقط می‌توانید فرزند یا همسرِ افراد شاخهٔ خودتان را اضافه کنید");
+  }
   checkParents(people, p);
   const row = await env.DB.prepare(
     `INSERT INTO people (first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id)
@@ -345,7 +401,7 @@ const createPerson: Handler = async ({ env, request, user }) => {
     .first<Person>();
 
   // Optional: link the new person as spouse of an existing person in the same request.
-  const spouseOf = optId(b.spouse_of);
+  const spouseOf = spouseOfId;
   if (spouseOf && row) {
     const other = people.get(spouseOf);
     if (other && other.gender !== row.gender) {
@@ -357,12 +413,16 @@ const createPerson: Handler = async ({ env, request, user }) => {
 };
 
 const updatePerson: Handler = async ({ env, request, user, params }) => {
-  require(user, "editor");
+  const me = require(user, "editor");
   const id = optId(params[0])!;
-  const people = await loadPeople(env);
+  const { people, acc } = await loadScoped(env, me);
   const existing = people.get(id);
-  if (!existing) throw new HttpError(404, "شخص یافت نشد");
+  if (!existing || !canSee(acc, id)) throw new HttpError(404, "شخص یافت نشد");
+  if (!canChange(acc, id)) throw new HttpError(403, NOT_YOURS);
   const p = parsePerson(await body(request), existing);
+  // hidden parents stay as they are; new ones must be visible
+  if (p.father_id !== existing.father_id) requireVisible(acc, [p.father_id]);
+  if (p.mother_id !== existing.mother_id) requireVisible(acc, [p.mother_id]);
   checkParents(people, p, id);
   if (p.gender !== existing.gender) {
     const key = existing.gender === "male" ? "father_id" : "mother_id";
@@ -383,8 +443,16 @@ const updatePerson: Handler = async ({ env, request, user, params }) => {
 };
 
 const deletePerson: Handler = async ({ env, user, params }) => {
-  require(user, "editor");
+  const me = require(user, "editor");
   const id = optId(params[0])!;
+  const { acc } = await loadScoped(env, me);
+  if (!canSee(acc, id)) throw new HttpError(404, "شخص یافت نشد");
+  if (!canChange(acc, id)) throw new HttpError(403, NOT_YOURS);
+  // deleting a branch root would silently widen that user's access
+  const owner = await env.DB.prepare("SELECT display_name, username FROM users WHERE branch_root_id = ? LIMIT 1")
+    .bind(id)
+    .first<{ display_name: string; username: string }>();
+  if (owner) throw new HttpError(400, `این شخص مبنای دسترسی کاربر «${owner.display_name || owner.username}» است؛ ابتدا دسترسی او را تغییر دهید`);
   await env.DB.batch([
     env.DB.prepare("UPDATE people SET father_id = NULL WHERE father_id = ?").bind(id),
     env.DB.prepare("UPDATE people SET mother_id = NULL WHERE mother_id = ?").bind(id),
@@ -413,8 +481,11 @@ function parseMarriage(b: Record<string, unknown>, base?: Marriage): Omit<Marria
   };
 }
 
-async function checkSpouses(env: Env, m: Omit<Marriage, "id">) {
-  const people = await loadPeople(env);
+async function checkSpouses(env: Env, user: User, m: Omit<Marriage, "id">, existing?: Marriage) {
+  const { people, acc } = await loadScoped(env, user);
+  requireVisible(acc, [m.husband_id, m.wife_id]);
+  if (!canChange(acc, m.husband_id) && !canChange(acc, m.wife_id)) throw new HttpError(403, NOT_YOURS);
+  if (existing && !canChange(acc, existing.husband_id) && !canChange(acc, existing.wife_id)) throw new HttpError(403, NOT_YOURS);
   const h = people.get(m.husband_id);
   const w = people.get(m.wife_id);
   if (!h || !w) throw new HttpError(400, "شخص انتخاب‌شده وجود ندارد");
@@ -426,9 +497,9 @@ async function checkSpouses(env: Env, m: Omit<Marriage, "id">) {
 }
 
 const createMarriage: Handler = async ({ env, request, user }) => {
-  require(user, "editor");
+  const me = require(user, "editor");
   const m = parseMarriage(await body(request));
-  await checkSpouses(env, m);
+  await checkSpouses(env, me, m);
   const row = await env.DB.prepare(
     `INSERT INTO marriages (husband_id, wife_id, status, marriage_date, end_date, notes) VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT DO NOTHING RETURNING id`,
@@ -440,12 +511,12 @@ const createMarriage: Handler = async ({ env, request, user }) => {
 };
 
 const updateMarriage: Handler = async ({ env, request, user, params }) => {
-  require(user, "editor");
+  const me = require(user, "editor");
   const id = optId(params[0])!;
   const existing = await env.DB.prepare("SELECT * FROM marriages WHERE id = ?").bind(id).first<Marriage>();
   if (!existing) throw new HttpError(404, "ازدواج یافت نشد");
   const m = parseMarriage(await body(request), existing);
-  await checkSpouses(env, m);
+  await checkSpouses(env, me, m, existing);
   try {
     await env.DB.prepare(
       "UPDATE marriages SET husband_id = ?, wife_id = ?, status = ?, marriage_date = ?, end_date = ?, notes = ? WHERE id = ?",
@@ -459,8 +530,13 @@ const updateMarriage: Handler = async ({ env, request, user, params }) => {
 };
 
 const deleteMarriage: Handler = async ({ env, user, params }) => {
-  require(user, "editor");
-  await env.DB.prepare("DELETE FROM marriages WHERE id = ?").bind(optId(params[0])).run();
+  const me = require(user, "editor");
+  const id = optId(params[0])!;
+  const existing = await env.DB.prepare("SELECT * FROM marriages WHERE id = ?").bind(id).first<Marriage>();
+  if (!existing) return json({ ok: true });
+  const { acc } = await loadScoped(env, me);
+  if (!canChange(acc, existing.husband_id) && !canChange(acc, existing.wife_id)) throw new HttpError(403, NOT_YOURS);
+  await env.DB.prepare("DELETE FROM marriages WHERE id = ?").bind(id).run();
   return json({ ok: true });
 };
 

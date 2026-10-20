@@ -89,3 +89,26 @@ test("relative groups", () => {
   assert.deepEqual(groups["دامادها"], [10]);
   assert.deepEqual(groups["نوه‌ها"].sort((a, b) => a - b), [7, 9, 11]);
 });
+
+import { generations, access } from "../public/js/generations.js";
+
+test("generations put married-in spouses on their partner's level", () => {
+  const g = generations(people, marriages);
+  assert.equal(g.get(1), 1);
+  assert.equal(g.get(3), 2);
+  assert.equal(g.get(6), 2); // Maryam married into gen 2 (her parents 15/16 are gen 1)
+  assert.equal(g.get(7), 3);
+  assert.equal(g.get(12), 4);
+  assert.equal(g.get(14), 2); // Karim, married in without parents
+});
+
+test("branch access: own branch + lineage, others down to a generation", () => {
+  // Hossein (4)'s branch; others visible down to gen 2
+  const a = access({ role: "editor", branch_root_id: 4, visible_gens: 2 }, people, marriages);
+  for (const id of [4, 8, 9, 7, 12]) assert.ok(a.visible.has(id), `visible ${id}`); // 7 married 9 → in branch
+  for (const id of [1, 2, 3, 5]) assert.ok(a.visible.has(id), `gen ≤ 2 ${id}`);
+  assert.ok(!a.visible.has(11), "Mina (gen 3, Zahra's branch) hidden");
+  assert.ok(a.editable.has(9) && !a.editable.has(3));
+  const v = access({ role: "viewer", branch_root_id: 999, visible_gens: null }, people, marriages);
+  assert.equal(v.visible.size, 0, "missing branch root shows nothing");
+});

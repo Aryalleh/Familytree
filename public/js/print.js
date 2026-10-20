@@ -28,14 +28,15 @@ export const SIZES = { small: 0.42, medium: 0.58, large: 0.78 };
 /**
  * @param {{orientation:string, notes:'card'|'list'|'none'}} opts
  */
-export function prepare(fam, { orientation, notes }) {
-  const model = buildModel(fam, fam, { duplicates: true });
+export function prepare(fam, { orientation, notes, gens = null }) {
+  const model = buildModel(fam, fam, { duplicates: true, gens });
   const hasNotes = [...fam.people.values()].some((p) => p.notes);
   const noteLines = notes === "card" && hasNotes ? CARD_NOTE_LINES : 0;
   const cardH = cardHeight(noteLines);
   const full = positionModel(model, { orientation, cardH });
-  full.rows.forEach((r, i) => r.blocks.forEach((b) => model.genOf.set(b.key, i + 1)));
-  return { model, full, orientation, cardH, noteLines, notes: hasNotes ? notes : "none", generations: full.rows.length };
+  if (!gens) full.rows.forEach((r, i) => r.blocks.forEach((b) => model.genOf.set(b.key, i + 1)));
+  const generations = Math.max(1, ...model.genOf.values());
+  return { model, full, orientation, cardH, noteLines, notes: hasNotes ? notes : "none", generations };
 }
 
 /**

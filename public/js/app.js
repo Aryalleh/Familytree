@@ -1,6 +1,7 @@
 import { Family, KIND_LABELS } from "./kinship.js";
 import { TreeView, lifeSpan, toFa } from "./tree.js";
 import { prepare, planPages, renderPages, PAPERS } from "./print.js";
+import { generations, branchOf } from "./generations.js";
 import { OfflineError, local, applyOps, editType, queueEdit, replay, describeOp, CHANGES_FORMAT } from "./offline.js";
 
 // ---------------------------------------------------------------------------
@@ -107,11 +108,24 @@ const S = {
   tree: null,
   mode: store.get("ft_mode") === "family" ? "family" : "all",
   panelTab: "family",
+  gens: new Map(),
+  branch: null,
+  access: null,
+  genRange: (() => {
+    try {
+      return JSON.parse(localStorage.getItem("ft_genrange") || "null");
+    } catch {
+      return null;
+    }
+  })(),
   compareId: null,
 };
 
 const canEdit = () => S.user && (S.user.role === "admin" || S.user.role === "editor");
 const isAdmin = () => S.user?.role === "admin";
+/** An editor limited to one branch (the server enforces the same rule). */
+const branchUser = () => !isAdmin() && S.user?.branch_root_id != null;
+const canEditPerson = (id) => canEdit() && (!branchUser() || !!S.branch?.has(id));
 const ROLE_FA = { admin: "مدیر", editor: "ویرایشگر", viewer: "بیننده" };
 const STATUS_FA = { married: "متأهل", divorced: "جداشده", widowed: "فوت همسر" };
 
@@ -271,7 +285,7 @@ function renderMain() {
           <button class="nav-btn active" data-act="map" title="نقشه"><span class="ico">🗺️</span><span class="lbl">نقشه</span></button>
           <button class="nav-btn" data-act="list" title="فهرست افراد"><span class="ico">👥</span><span class="lbl">فهرست افراد</span></button>
           <button class="nav-btn" data-act="finder" title="خویشاوندی"><span class="ico">🔗</span><span class="lbl">خویشاوندی</span></button>
-          ${canEdit() ? `<button class="nav-btn" data-act="add" title="افزودن شخص"><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>` : ""}
+          ${canEdit() && !branchUser() ? `<button class="nav-btn" data-act="add" title="افزودن شخص"><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>` : ""}
           <button class="nav-btn" data-act="sync" title="آفلاین و همگام‌سازی"><span class="ico">☁️</span><span class="lbl">آفلاین</span><span class="net-chip" hidden></span></button>
           <button class="nav-btn" data-act="settings" title="تنظیمات"><span class="ico">🛠️</span><span class="lbl">تنظیمات</span></button>
           ${isAdmin() ? `<button class="nav-btn" data-act="users" title="مدیریت"><span class="ico">⚙️</span><span class="lbl">مدیریت</span></button>` : ""}
@@ -299,6 +313,7 @@ function renderMain() {
             <button data-zoom="out" title="کوچک‌نمایی"><span class="ico">－</span><span class="lbl">کوچک‌نمایی</span></button>
             <button data-zoom="center" title="مرکز نقشه"><span class="ico">◎</span><span class="lbl">مرکز نقشه</span></button>
             <button data-zoom="fit" title="نمایش کل درخت"><span class="ico">⤢</span><span class="lbl">کل درخت</span></button>
+            <button data-zoom="gens" title="نمایش نسل‌ها"><span class="ico">☰</span><span class="lbl gens-lbl"></span></button>
             <button data-zoom="orient" title="چیدمان"><span class="ico">⇅</span><span class="lbl orient-lbl"></span></button>
             <button data-zoom="mode" title="حالت نمایش"><span class="ico">👁</span><span class="lbl mode-lbl"></span></button>
             <button data-zoom="me" title="رفتن به «من»"><span class="ico">★</span><span class="lbl">من</span></button>
@@ -389,6 +404,8 @@ function toolbarAction(z) {
     const root = familyRoot();
     if (root != null) focusFamily(root);
     else t.fit();
+  } else if (z === "gens") {
+    openGenRange();
   } else if (z === "orient") {
     const orientation = prefs().orientation === "horizontal" ? "vertical" : "horizontal";
     savePrefs({ orientation }).catch((e) => toast(e.message, true));
@@ -410,6 +427,9 @@ function updateModeLabel() {
   const l = $(".mode-lbl");
   if (l) l.textContent = S.mode === "family" ? "خانوادهٔ نزدیک" : "کل خاندان";
   $("[data-zoom=mode]")?.classList.toggle("on", S.mode === "family");
+  const gl = $(".gens-lbl");
+  if (gl) gl.textContent = S.genRange ? `نسل ${toFa(S.genRange.from)}–${toFa(S.genRange.to)}` : "همهٔ نسل‌ها";
+  $("[data-zoom=gens]")?.classList.toggle("on", !!S.genRange);
   const o = $(".orient-lbl");
   if (o) o.textContent = prefs().orientation === "horizontal" ? "افقی" : "عمودی";
 }
@@ -434,6 +454,11 @@ async function loadTree({ fit = false } = {}) {
     const merged = applyOps(data.people, data.marriages, local.ops(S.user.id));
     S.people = merged.people;
     S.marriages = merged.marriages;
+    S.access = data.access || null;
+    // generations from the server (computed on the whole tree); local ones for offline additions
+    S.gens = generations(S.people, S.marriages);
+    for (const p of S.people) if (p.gen) S.gens.set(p.id, p.gen);
+    S.branch = branchUser() ? branchOf(S.user.branch_root_id, S.people, S.marriages) : null;
     S.fam = new Family(S.people, S.marriages);
     S.relCache.clear();
     if (S.focusId == null) {
@@ -495,12 +520,58 @@ function closeFamily(id) {
 
 function shownFamily() {
   const root = S.mode === "family" ? familyRoot() : null;
-  return root != null ? closeFamily(root) : S.fam;
+  const fam = root != null ? closeFamily(root) : S.fam;
+  const r = S.genRange;
+  if (!r) return fam;
+  const inRange = (id) => {
+    const g = S.gens.get(id) ?? 1;
+    return g >= r.from && g <= r.to;
+  };
+  const people = [...fam.people.values()].filter((p) => inRange(p.id));
+  const ids = new Set(people.map((p) => p.id));
+  return new Family(people, fam.marriages.filter((m) => ids.has(m.husband_id) && ids.has(m.wife_id)));
+}
+
+const maxGen = () => Math.max(1, ...S.gens.values());
+
+function openGenRange() {
+  const n = maxGen();
+  const r = S.genRange || { from: 1, to: n };
+  const opts = (sel) => Array.from({ length: n }, (_, i) => `<option value="${i + 1}" ${i + 1 === sel ? "selected" : ""}>نسل ${toFa(i + 1)}</option>`).join("");
+  const { el, close } = modal({
+    title: "نمایش نسل‌ها",
+    body: `<div class="row">
+        <label class="field"><span>از نسل</span><select class="input" name="from">${opts(r.from)}</select></label>
+        <label class="field"><span>تا نسل</span><select class="input" name="to">${opts(Math.min(r.to, n))}</select></label>
+      </div>
+      <p class="hint">نسل ۱ قدیمی‌ترین نسل است. همسرانی که از بیرون به خانواده آمده‌اند هم‌نسلِ همسرشان حساب می‌شوند.</p>`,
+    foot: `<button class="btn" data-all>همهٔ نسل‌ها</button><button class="btn primary" data-ok>نمایش</button>`,
+  });
+  const apply = (range) => {
+    S.genRange = range;
+    store.set("ft_genrange", range ? JSON.stringify(range) : null);
+    close();
+    updateModeLabel();
+    redraw(true);
+    S.tree.fit();
+  };
+  $("[data-all]", el).addEventListener("click", () => apply(null));
+  $("[data-ok]", el).addEventListener("click", () => {
+    const a = Number($("[name=from]", el).value);
+    const b = Number($("[name=to]", el).value);
+    const range = { from: Math.min(a, b), to: Math.max(a, b) };
+    apply(range.from === 1 && range.to >= n ? null : range);
+  });
 }
 
 function redraw(relayout = false) {
   const empty = $(".empty");
-  if (!S.people.length) {
+  const restricted = S.access && !S.access.all;
+  if (!S.people.length && restricted) {
+    empty.hidden = false;
+    empty.innerHTML = `<div class="box"><div class="big">🔒</div><h2>هنوز دسترسی ندارید</h2>
+      <p class="muted">مدیر شجره‌نامه هنوز مشخص نکرده که کدام بخش از شجره‌نامه را ببینید. از او بخواهید دسترسی شما را تعیین کند.</p></div>`;
+  } else if (!S.people.length) {
     empty.hidden = false;
     empty.innerHTML = `<div class="box">
       <div class="big">🌱</div>
@@ -514,7 +585,7 @@ function redraw(relayout = false) {
   const kin = new Set(S.selectedId != null && person(S.selectedId) ? familyIds(S.selectedId).slice(1) : []);
   const pr = prefs();
   const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0 };
-  S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation });
+  S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation, gens: S.gens });
   renderLegend();
 }
 
@@ -669,14 +740,16 @@ function renderPanel() {
   const groups = S.fam.relativeGroups(p.id).filter((g) => !["پدر", "مادر", "همسر", "شوهر", "پسران", "دختران"].includes(g.title));
   const spouses = S.fam.spousesOf(p.id);
   const children = S.fam.childrenOf(p.id);
-  const editor = canEdit();
+  const editor = canEditPerson(p.id);
+  // a branch editor can't add people above their branch root
+  const upward = editor && !(branchUser() && p.id === S.user.branch_root_id);
   const tab = S.panelTab;
   const span = lifeSpan(p);
 
   const familyTab = `
     <div class="psec"><h4>والدین</h4>
-      ${p.father_id && person(p.father_id) ? prow(p.father_id, "پدر") : editor ? `<button class="add-row" data-add="father">＋ افزودن پدر</button>` : `<div class="muted">پدر ثبت نشده</div>`}
-      ${p.mother_id && person(p.mother_id) ? prow(p.mother_id, "مادر") : editor ? `<button class="add-row" data-add="mother">＋ افزودن مادر</button>` : `<div class="muted">مادر ثبت نشده</div>`}
+      ${p.father_id && person(p.father_id) ? prow(p.father_id, "پدر") : upward ? `<button class="add-row" data-add="father">＋ افزودن پدر</button>` : `<div class="muted">پدر ثبت نشده</div>`}
+      ${p.mother_id && person(p.mother_id) ? prow(p.mother_id, "مادر") : upward ? `<button class="add-row" data-add="mother">＋ افزودن مادر</button>` : `<div class="muted">مادر ثبت نشده</div>`}
     </div>
     <div class="psec"><h4>${p.gender === "male" ? "همسرها" : "همسر"}</h4>
       ${spouses
@@ -694,7 +767,7 @@ function renderPanel() {
       ${children.map((c) => prow(c, person(c).gender === "male" ? "♂ پسر" : "♀ دختر")).join("")}
       ${editor ? `<div class="add-pair"><button class="add-row" data-add="son">＋ پسر</button><button class="add-row" data-add="daughter">＋ دختر</button></div>` : !children.length ? `<div class="muted">ثبت نشده</div>` : ""}
     </div>
-    ${editor && (p.father_id || p.mother_id) ? `<div class="add-pair"><button class="add-row" data-add="brother">＋ برادر</button><button class="add-row" data-add="sister">＋ خواهر</button></div>` : ""}
+    ${upward && (p.father_id || p.mother_id) ? `<div class="add-pair"><button class="add-row" data-add="brother">＋ برادر</button><button class="add-row" data-add="sister">＋ خواهر</button></div>` : ""}
     ${groups.map((g) => `<div class="psec"><h4>${g.title}</h4><div class="chips">${g.ids.map(chip).join("")}</div></div>`).join("")}`;
 
   const infoTab = `
@@ -836,7 +909,7 @@ function renderUnionPanel(panel, main) {
       ${children.length ? `<div class="psec"><h4>فرزندان <span class="muted">(${toFa(children.length)} نفر)</span></h4>${children.map((c) => prow(c, person(c).gender === "male" ? "♂ پسر" : "♀ دختر")).join("")}</div>` : ""}
       ${m.notes ? `<div class="psec"><h4>یادداشت</h4><div class="notes">${esc(m.notes)}</div></div>` : ""}
       ${
-        canEdit()
+        canEditPerson(m.husband_id) || canEditPerson(m.wife_id)
           ? `<div class="actions">
           <button class="btn small" data-act="child">＋ فرزند این زوج</button>
           <button class="btn small" data-act="edit">✎ ویرایش</button>
@@ -1287,6 +1360,7 @@ function openAccount() {
   const { el, close } = modal({
     title: "حساب کاربری",
     body: `<p>${esc(S.user.display_name)} — <span dir="ltr">${esc(S.user.username)}</span> <span class="role">${ROLE_FA[S.user.role]}</span></p>
+      <p class="hint">دسترسی شما: ${esc(accessSummary(S.user))}</p>
       <form id="pw">
         <label class="field"><span>رمز عبور فعلی</span><input class="input" type="password" name="current_password" autocomplete="current-password" dir="ltr"></label>
         <label class="field"><span>رمز عبور تازه</span><input class="input" type="password" name="new_password" autocomplete="new-password" dir="ltr"></label>
@@ -1300,6 +1374,57 @@ function openAccount() {
       await api("PUT", "/api/me/password", Object.fromEntries(new FormData($("#pw", el))));
       close();
       toast("رمز عبور تغییر کرد");
+    } catch (e) {
+      $(".error", el).textContent = e.message;
+    }
+  });
+}
+
+const ACCESS_HINT =
+  "شاخه = شخص مبنا، همهٔ نوادگانش و همسرانشان. ویرایشگرِ دارای شاخه فقط همان شاخه را ویرایش می‌کند؛ نیاکانِ شخص مبنا همیشه دیده می‌شوند و بقیهٔ شجره‌نامه فقط تا نسلی که تعیین کنید.";
+
+function accessSummary(u) {
+  if (u.role === "admin") return "همه‌چیز";
+  const root = u.branch_root_id != null ? person(u.branch_root_id) : null;
+  const g = u.visible_gens;
+  const rest = g == null ? "" : g === 0 ? "بقیه پنهان" : `بقیه تا نسل ${toFa(g)}`;
+  if (u.branch_root_id != null) return [`شاخهٔ ${root ? lineageName(root, 1) : "؟"}`, rest || "بقیه: همه"].join(" · ");
+  return g == null ? "کل شجره‌نامه" : g === 0 ? "هیچ (منتظر تعیین دسترسی)" : `تا نسل ${toFa(g)}`;
+}
+
+function accessFields(u) {
+  const n = maxGen();
+  const g = u.visible_gens;
+  return `
+    <label class="field"><span>شاخهٔ کاربر (شخص مبنا)</span>
+      <select class="input" name="branch_root_id">${personOptions(() => true, u.branch_root_id ?? null, { none: "— کل شجره‌نامه —" })}</select></label>
+    <label class="field"><span>دیدن شاخه‌های دیگر تا نسل</span>
+      <select class="input" name="visible_gens">
+        <option value="" ${g == null ? "selected" : ""}>همهٔ نسل‌ها</option>
+        <option value="0" ${g === 0 ? "selected" : ""}>هیچ (فقط شاخهٔ خودش)</option>
+        ${Array.from({ length: n }, (_, i) => `<option value="${i + 1}" ${g === i + 1 ? "selected" : ""}>تا نسل ${toFa(i + 1)}</option>`).join("")}
+      </select></label>`;
+}
+
+function readAccess(el) {
+  const root = $("[name=branch_root_id]", el).value;
+  const g = $("[name=visible_gens]", el).value;
+  return { branch_root_id: root ? Number(root) : null, visible_gens: g === "" ? null : Number(g) };
+}
+
+function openAccessForm(u, done) {
+  const { el, close } = modal({
+    title: `دسترسی ${esc(u.display_name || u.username)}`,
+    body: `${accessFields(u)}<p class="hint">${ACCESS_HINT}</p><div class="error"></div>`,
+    foot: `<button class="btn" data-cancel>انصراف</button><button class="btn primary" data-save>ذخیره</button>`,
+  });
+  $("[data-cancel]", el).addEventListener("click", close);
+  $("[data-save]", el).addEventListener("click", async () => {
+    try {
+      await api("PUT", `/api/users/${u.id}`, readAccess(el));
+      close();
+      toast("دسترسی ذخیره شد");
+      done?.();
     } catch (e) {
       $(".error", el).textContent = e.message;
     }
@@ -1321,12 +1446,13 @@ async function openAdmin() {
       <div data-pane="users">
         <label class="check"><input type="checkbox" name="allow_registration" ${data.allowRegistration ? "checked" : ""}> ثبت‌نام عمومی آزاد باشد (کاربران تازه «بیننده» می‌شوند)</label>
         <table class="users">
-          <thead><tr><th>نام</th><th>نام کاربری</th><th>نقش</th><th></th></tr></thead>
+          <thead><tr><th>نام</th><th>نام کاربری</th><th>نقش</th><th>دسترسی</th><th></th></tr></thead>
           <tbody>${data.users
             .map(
               (u) => `<tr data-uid="${u.id}">
               <td>${esc(u.display_name)}</td><td dir="ltr">${esc(u.username)}</td>
               <td><select class="input" data-role ${u.id === S.user.id ? "disabled" : ""}>${Object.entries(ROLE_FA).map(([k, v]) => `<option value="${k}" ${u.role === k ? "selected" : ""}>${v}</option>`).join("")}</select></td>
+              <td class="access-cell">${esc(accessSummary(u))} ${u.role !== "admin" ? `<button class="btn small" data-access>تعیین</button>` : ""}</td>
               <td><button class="btn small" data-reset>رمز تازه</button> ${u.id !== S.user.id ? `<button class="btn small danger" data-del>حذف</button>` : ""}</td>
             </tr>`,
             )
@@ -1339,9 +1465,10 @@ async function openAdmin() {
           <label class="field"><span>رمز عبور</span><input class="input" name="password" type="password" dir="ltr" autocomplete="new-password"></label>
           <label class="field"><span>نقش</span><select class="input" name="role">${Object.entries(ROLE_FA).map(([k, v]) => `<option value="${k}" ${k === "viewer" ? "selected" : ""}>${v}</option>`).join("")}</select></label>
         </form>
+        <div class="row">${accessFields({})}</div>
         <div class="error"></div>
         <button class="btn primary" data-create>ساخت کاربر</button>
-        <p class="hint">مدیر: همه‌چیز · ویرایشگر: افزودن و ویرایش اشخاص · بیننده: فقط دیدن</p>
+        <p class="hint">مدیر: همه‌چیز · ویرایشگر: افزودن و ویرایش اشخاص · بیننده: فقط دیدن.<br>${ACCESS_HINT}</p>
       </div>
       <div data-pane="backup" hidden>
         <p>از کل شجره‌نامه (اشخاص و ازدواج‌ها) فایل JSON بگیرید یا آن را بازیابی کنید.</p>
@@ -1365,6 +1492,10 @@ async function openAdmin() {
   $$("tr[data-uid]", el).forEach((tr) => {
     const id = tr.dataset.uid;
     $("[data-role]", tr).addEventListener("change", (e) => api("PUT", `/api/users/${id}`, { role: e.target.value }).then(() => toast("نقش تغییر کرد"), fail));
+    $("[data-access]", tr)?.addEventListener("click", () => {
+      const u = data.users.find((x) => String(x.id) === id);
+      openAccessForm(u, () => (close(), openAdmin()));
+    });
     $("[data-reset]", tr).addEventListener("click", () => {
       const pw = prompt("رمز عبور تازه (دست‌کم ۸ نویسه):");
       if (pw) api("PUT", `/api/users/${id}`, { password: pw }).then(() => toast("رمز تغییر کرد"), fail);
@@ -1375,7 +1506,7 @@ async function openAdmin() {
   });
   $("[data-create]", el).addEventListener("click", async () => {
     try {
-      await api("POST", "/api/users", Object.fromEntries(new FormData($("#nu", el))));
+      await api("POST", "/api/users", { ...Object.fromEntries(new FormData($("#nu", el))), ...readAccess(el) });
       close();
       toast("کاربر ساخته شد");
       openAdmin();
@@ -1600,7 +1731,7 @@ function buildPrint(opts) {
   const orientation = opts.orientation || prefs().orientation;
   const notes = opts.notes || "list";
   if (!printPrep || printPrep.fam !== S.fam || printPrep.orientation !== orientation || printPrep.notesMode !== notes) {
-    printPrep = { ...prepare(S.fam, { orientation, notes }), fam: S.fam, notesMode: notes };
+    printPrep = { ...prepare(S.fam, { orientation, notes, gens: S.gens }), fam: S.fam, notesMode: notes };
   }
   const plan = planPages(printPrep, { ...opts, to: Math.min(opts.to, printPrep.generations) });
   renderPages($("#print-root"), plan, printPrep, { title: "شجره‌نامه خاندان", legendHtml: PRINT_LEGEND });
@@ -1610,15 +1741,15 @@ function buildPrint(opts) {
 function openPrintDialog() {
   if (!S.people.length) return toast("شجره‌نامه خالی است");
   const pr = prefs();
-  const gens = prepare(S.fam, { orientation: pr.orientation, notes: "none" }).generations;
+  const gens = maxGen();
   const anyNotes = S.people.some((p) => p.notes);
   const genOpts = (sel) => Array.from({ length: gens }, (_, i) => `<option value="${i + 1}" ${i + 1 === sel ? "selected" : ""}>نسل ${toFa(i + 1)}</option>`).join("");
   const { el, close } = modal({
     title: "چاپ شجره‌نامه",
     body: `<form id="prf">
       <div class="row">
-        <label class="field"><span>از نسل</span><select class="input" name="from">${genOpts(1)}</select></label>
-        <label class="field"><span>تا نسل</span><select class="input" name="to">${genOpts(gens)}</select></label>
+        <label class="field"><span>از نسل</span><select class="input" name="from">${genOpts(S.genRange?.from ?? 1)}</select></label>
+        <label class="field"><span>تا نسل</span><select class="input" name="to">${genOpts(S.genRange?.to ?? gens)}</select></label>
       </div>
       <div class="row">
         <label class="field"><span>کاغذ</span><select class="input" name="paper">${Object.entries(PAPERS).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join("")}</select></label>
