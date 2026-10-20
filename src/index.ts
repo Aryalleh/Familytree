@@ -130,7 +130,7 @@ const login: Handler = async ({ env, request, url }) => {
   const b = await body(request);
   const username = str(b.username, 32);
   const password = String(b.password ?? "");
-  const row = await env.DB.prepare("SELECT id, username, display_name, role, password_hash FROM users WHERE username = ?")
+  const row = await env.DB.prepare("SELECT id, username, display_name, role, prefs, password_hash FROM users WHERE username = ?")
     .bind(username)
     .first<User & { password_hash: string }>();
   if (!row || !(await verifyPassword(password, row.password_hash))) {
@@ -144,6 +144,17 @@ const logout: Handler = async ({ env, request, url }) => {
   const token = readSessionToken(request);
   if (token) await destroySession(env, token);
   return json({ ok: true }, 200, { "Set-Cookie": clearCookie(url) });
+};
+
+const PREF_LIMIT = 4000;
+
+const updatePrefs: Handler = async ({ env, request, user }) => {
+  const me = require(user, "viewer");
+  const b = await body(request);
+  const prefs = JSON.stringify(b.prefs ?? {});
+  if (prefs.length > PREF_LIMIT || typeof b.prefs !== "object" || Array.isArray(b.prefs)) throw new HttpError(400, "تنظیمات نامعتبر است");
+  await env.DB.prepare("UPDATE users SET prefs = ? WHERE id = ?").bind(prefs, me.id).run();
+  return json({ ok: true });
 };
 
 const changePassword: Handler = async ({ env, request, user }) => {
@@ -521,6 +532,7 @@ const routes: [string, RegExp, Handler][] = [
   ["POST", /^\/api\/login$/, login],
   ["POST", /^\/api\/logout$/, logout],
   ["PUT", /^\/api\/me\/password$/, changePassword],
+  ["PUT", /^\/api\/me\/prefs$/, updatePrefs],
   ["GET", /^\/api\/users$/, listUsers],
   ["POST", /^\/api\/users$/, createUser],
   ["PUT", /^\/api\/users\/(\d+)$/, updateUser],

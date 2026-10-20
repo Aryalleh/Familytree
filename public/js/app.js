@@ -1,5 +1,6 @@
 import { Family, KIND_LABELS } from "./kinship.js";
 import { TreeView, lifeSpan, toFa } from "./tree.js";
+import { prepare, planPages, renderPages, PAPERS } from "./print.js";
 
 // ---------------------------------------------------------------------------
 // utilities
@@ -96,6 +97,38 @@ function fullName(p) {
   if (!p) return "؟";
   return `${p.first_name} ${p.last_name || ""}`.trim();
 }
+const DEFAULT_PREFS = { nameGens: 2, orientation: "vertical", hoverTip: true, notesOnTree: false };
+
+function prefs() {
+  let saved = {};
+  try {
+    saved = JSON.parse(S.user?.prefs || "{}");
+  } catch {
+    // ignore malformed prefs
+  }
+  return { ...DEFAULT_PREFS, ...saved };
+}
+
+async function savePrefs(next) {
+  const merged = { ...prefs(), ...next };
+  await api("PUT", "/api/me/prefs", { prefs: merged });
+  S.user.prefs = JSON.stringify(merged);
+}
+
+/** "علی رحیمی فرزند حسن فرزند محمد" — names repeat a lot in a family, so pickers show lineage. */
+function lineageName(p, gens = prefs().nameGens) {
+  if (!p) return "؟";
+  const parts = [fullName(p)];
+  let cur = p;
+  for (let i = 0; i < gens; i++) {
+    const par = person(cur.father_id) || person(cur.mother_id);
+    if (!par) break;
+    parts.push(par.first_name);
+    cur = par;
+  }
+  return parts.join(" فرزند ");
+}
+
 function relationsTo(id) {
   if (S.focusId == null) return [];
   if (!S.relCache.has(id)) S.relCache.set(id, S.fam.relations(S.focusId, id));
@@ -194,11 +227,12 @@ function renderMain() {
       <header class="topbar">
         <div class="brand"><span class="brand-logo">🌳</span><span class="brand-name">شجره‌نامه خاندان</span></div>
         <nav class="nav">
-          <button class="nav-btn active" data-act="map"><span class="ico">🗺️</span><span class="lbl">نقشه</span></button>
-          <button class="nav-btn" data-act="list"><span class="ico">👥</span><span class="lbl">فهرست افراد</span></button>
-          <button class="nav-btn" data-act="finder"><span class="ico">🔗</span><span class="lbl">خویشاوندی</span></button>
-          ${canEdit() ? `<button class="nav-btn" data-act="add"><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>` : ""}
-          ${isAdmin() ? `<button class="nav-btn" data-act="users"><span class="ico">⚙️</span><span class="lbl">مدیریت</span></button>` : ""}
+          <button class="nav-btn active" data-act="map" title="نقشه"><span class="ico">🗺️</span><span class="lbl">نقشه</span></button>
+          <button class="nav-btn" data-act="list" title="فهرست افراد"><span class="ico">👥</span><span class="lbl">فهرست افراد</span></button>
+          <button class="nav-btn" data-act="finder" title="خویشاوندی"><span class="ico">🔗</span><span class="lbl">خویشاوندی</span></button>
+          ${canEdit() ? `<button class="nav-btn" data-act="add" title="افزودن شخص"><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>` : ""}
+          <button class="nav-btn" data-act="settings" title="تنظیمات"><span class="ico">🛠️</span><span class="lbl">تنظیمات</span></button>
+          ${isAdmin() ? `<button class="nav-btn" data-act="users" title="مدیریت"><span class="ico">⚙️</span><span class="lbl">مدیریت</span></button>` : ""}
         </nav>
         <div class="spacer"></div>
         <button class="btn print-btn" data-act="print"><span>🖨️</span><span class="lbl">چاپ / PDF</span></button>
@@ -223,6 +257,7 @@ function renderMain() {
             <button data-zoom="out" title="کوچک‌نمایی"><span class="ico">－</span><span class="lbl">کوچک‌نمایی</span></button>
             <button data-zoom="center" title="مرکز نقشه"><span class="ico">◎</span><span class="lbl">مرکز نقشه</span></button>
             <button data-zoom="fit" title="نمایش کل درخت"><span class="ico">⤢</span><span class="lbl">کل درخت</span></button>
+            <button data-zoom="orient" title="چیدمان"><span class="ico">⇅</span><span class="lbl orient-lbl"></span></button>
             <button data-zoom="mode" title="حالت نمایش"><span class="ico">👁</span><span class="lbl mode-lbl"></span></button>
             <button data-zoom="me" title="رفتن به «من»"><span class="ico">★</span><span class="lbl">من</span></button>
             <button data-zoom="legend" title="راهنما"><span class="ico">?</span><span class="lbl">راهنما</span></button>
@@ -238,6 +273,7 @@ function renderMain() {
     onSelectPerson: (id) => selectPerson(id),
     onSelectUnion: (u) => selectUnion(u),
     onBackground: () => clearSelection(),
+    onHover: (p, e, rels) => (p ? showTip(p, e, rels) : ($("#tip").hidden = true)),
     minimap: $("svg.minimap"),
     insets: viewInsets,
   });
@@ -248,12 +284,13 @@ function renderMain() {
   $("[data-act=finder]").addEventListener("click", () => openFinder());
   $("[data-act=users]")?.addEventListener("click", () => openAdmin());
   $("[data-act=account]").addEventListener("click", () => openAccount());
-  $("[data-act=print]").addEventListener("click", () => {
-    enterPrint();
-    window.print();
+  $("[data-act=settings]").addEventListener("click", () => openSettings());
+  $("[data-act=print]").addEventListener("click", () => openPrintDialog());
+  window.addEventListener("beforeprint", () => {
+    // Ctrl+P without the print dialog: print the whole tree on one page
+    if (!$("#print-root").children.length) buildPrint({ from: 1, to: 999, paper: "a4l", mode: "one" });
   });
-  window.addEventListener("beforeprint", enterPrint);
-  window.addEventListener("afterprint", exitPrint);
+  window.addEventListener("afterprint", () => $("#print-root").replaceChildren());
   $("[data-act=logout]").addEventListener("click", async () => {
     await api("POST", "/api/logout", {}).catch(() => {});
     S.user = null;
@@ -303,6 +340,14 @@ function toolbarAction(z) {
     const root = familyRoot();
     if (root != null) focusFamily(root);
     else t.fit();
+  } else if (z === "orient") {
+    const orientation = prefs().orientation === "horizontal" ? "vertical" : "horizontal";
+    savePrefs({ orientation }).catch((e) => toast(e.message, true));
+    S.user.prefs = JSON.stringify({ ...prefs(), orientation });
+    updateModeLabel();
+    redraw(true);
+    if (S.selectedId != null) focusFamily(S.selectedId);
+    else t.fit();
   } else if (z === "me") {
     if (S.focusId && person(S.focusId)) selectPerson(S.focusId);
     else toast("ابتدا یک نفر را به‌عنوان «من» انتخاب کنید");
@@ -316,6 +361,8 @@ function updateModeLabel() {
   const l = $(".mode-lbl");
   if (l) l.textContent = S.mode === "family" ? "خانوادهٔ نزدیک" : "کل خاندان";
   $("[data-zoom=mode]")?.classList.toggle("on", S.mode === "family");
+  const o = $(".orient-lbl");
+  if (o) o.textContent = prefs().orientation === "horizontal" ? "افقی" : "عمودی";
 }
 
 async function loadTree({ fit = false } = {}) {
@@ -401,29 +448,37 @@ function redraw(relayout = false) {
   } else empty.hidden = true;
 
   const kin = new Set(S.selectedId != null && person(S.selectedId) ? familyIds(S.selectedId).slice(1) : []);
-  const state = S.printing
-    ? { focusId: S.focusId, relationsTo }
-    : { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo };
-  S.tree.render(shownFamily(), S.fam, state, { relayout: relayout || S.printing, duplicates: S.printing });
-  if (S.printing) S.tree.setPrintView(true);
+  const pr = prefs();
+  const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, notesOnTree: pr.notesOnTree };
+  S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation });
   renderLegend();
 }
 
-/**
- * Print version: people who married into another branch are drawn a second time under
- * their own parents (with a matching numbered marker) instead of long crossing lines.
- */
-function enterPrint() {
-  if (S.printing || !S.tree) return;
-  S.printing = true;
-  redraw(true);
-}
+// ---------------------------------------------------------------------------
+// hover card
 
-function exitPrint() {
-  if (!S.printing) return;
-  S.printing = false;
-  S.tree.setPrintView(false);
-  redraw(true);
+function showTip(p, e, rels) {
+  const tip = $("#tip");
+  if (!p || !prefs().hoverTip) {
+    tip.hidden = true;
+    return;
+  }
+  if (tip.dataset.id !== String(p.id)) {
+    tip.dataset.id = p.id;
+    const span = lifeSpan(p);
+    tip.innerHTML = `<b>${esc(lineageName(p, Math.max(1, prefs().nameGens)))}</b>
+      ${span ? `<div class="muted">${esc(span)}${p.birth_place ? ` · ${esc(p.birth_place)}` : ""}</div>` : ""}
+      ${rels?.length ? `<div class="rel-pills">${pills(rels)}</div>` : ""}
+      ${p.notes ? `<div class="tip-notes">${esc(p.notes)}</div>` : ""}`;
+  }
+  tip.hidden = false;
+  const r = tip.getBoundingClientRect();
+  let x = e.clientX + 16;
+  let y = e.clientY + 16;
+  if (x + r.width > innerWidth - 8) x = e.clientX - r.width - 16;
+  if (y + r.height > innerHeight - 8) y = e.clientY - r.height - 16;
+  tip.style.left = `${Math.max(8, x)}px`;
+  tip.style.top = `${Math.max(8, y)}px`;
 }
 
 function renderLegend() {
@@ -431,7 +486,7 @@ function renderLegend() {
   const collapsed = store.get("ft_legend") === "0";
   const focus = person(S.focusId);
   const kinds = ["self", "spouse", "parent", "child", "sibling", "blood", "inlaw", "step"];
-  lg.hidden = collapsed && !S.printing;
+  lg.hidden = collapsed;
   lg.innerHTML = `
     <div class="legend-row">
       <b>راهنمای نمادها:</b>
@@ -439,15 +494,14 @@ function renderLegend() {
       <span><i class="sw female"></i>زن</span>
       <span><i class="sw rings-sw">⚭</i>ازدواج</span>
       <span><i class="sw line"></i>فرزند</span>
-      <span class="no-print"><i class="sw selected"></i>فرد منتخب</span>
+      <span><i class="sw selected"></i>فرد منتخب</span>
       <span><i class="sw long"></i>شاخه‌های دیگر</span>
       <span><i class="sw ribbon"></i>درگذشته</span>
-      ${S.printing && S.tree?.layout?.markers.size ? `<span><i class="sw marker">۱</i>شمارهٔ یکسان = یک نفر که دو جا آمده (زیر پدر و مادرش و کنار همسرش)</span>` : ""}
     </div>
     ${
       focus
         ? `<div class="legend-row kinds"><b>نسبت با ${esc(fullName(focus))}:</b>${kinds.map((k) => `<span><i class="sw dot" style="background:var(--k-${k})"></i>${KIND_LABELS[k]}</span>`).join("")}</div>`
-        : `<div class="legend-row muted no-print">برای دیدن نسبت هر نفر روی کارتش، یک نفر را «★ من» قرار دهید.</div>`
+        : `<div class="legend-row muted">برای دیدن نسبت هر نفر روی کارتش، یک نفر را «★ من» قرار دهید.</div>`
     }`;
 }
 
@@ -784,7 +838,7 @@ function openPeopleList() {
       .filter((p) => !q || normalize(`${fullName(p)} ${p.nickname}`).includes(q))
       .map(
         (p) => `<tr data-id="${p.id}" tabindex="0">
-          <td>${avatar(p)} ${esc(fullName(p))}</td>
+          <td>${avatar(p)} ${esc(lineageName(p))}</td>
           <td>${p.gender === "male" ? "مرد" : "زن"}</td>
           <td>${esc(lifeSpan(p))}</td>
           <td>${esc(person(p.father_id) ? fullName(person(p.father_id)) : "")}</td>
@@ -831,13 +885,13 @@ function modal({ title, body, wide = false, foot = "" }) {
 }
 
 function personOptions(filter, selected, { none = "— هیچ —" } = {}) {
-  const list = S.people.filter(filter).sort((a, b) => fullName(a).localeCompare(fullName(b), "fa"));
+  const list = S.people.filter(filter).sort((a, b) => lineageName(a).localeCompare(lineageName(b), "fa"));
   return (
     (none ? `<option value="">${none}</option>` : "") +
     list
       .map((p) => {
         const span = lifeSpan(p);
-        return `<option value="${p.id}" ${p.id === selected ? "selected" : ""}>${esc(fullName(p))}${span ? ` (${esc(span)})` : ""}</option>`;
+        return `<option value="${p.id}" ${p.id === selected ? "selected" : ""}>${esc(lineageName(p))}${span ? ` (${esc(span)})` : ""}</option>`;
       })
       .join("")
   );
@@ -1281,6 +1335,147 @@ async function openAdmin() {
 }
 
 // ---------------------------------------------------------------------------
+// settings
+
+function openSettings() {
+  const pr = prefs();
+  const sample = S.people.find((p) => person(p.father_id) && person(person(p.father_id).father_id)) || S.people[0];
+  const { el, close } = modal({
+    title: "تنظیمات نمایش",
+    body: `<form id="sf">
+      <label class="field"><span>تعداد نسلِ نام پدران کنار نام هر نفر (در فهرست‌ها و انتخاب افراد)</span>
+        <select class="input" name="nameGens">${[0, 1, 2, 3, 4, 5, 6].map((n) => `<option value="${n}" ${pr.nameGens === n ? "selected" : ""}>${n ? `${toFa(n)} نسل` : "فقط نام"}</option>`).join("")}</select>
+      </label>
+      ${sample ? `<p class="hint">نمونه: <b data-sample></b></p>` : ""}
+      <div class="field"><span>چیدمان شجره‌نامه</span>
+        <label class="check"><input type="radio" name="orientation" value="vertical" ${pr.orientation !== "horizontal" ? "checked" : ""}> عمودی: نسل‌ها از بالا به پایین، فرزندان کنار هم</label>
+        <label class="check"><input type="radio" name="orientation" value="horizontal" ${pr.orientation === "horizontal" ? "checked" : ""}> افقی: نسل‌ها از راست به چپ، فرزندان زیر هم (برای خانواده‌های پرجمعیت، کم‌عرض‌تر)</label>
+      </div>
+      <label class="check"><input type="checkbox" name="hoverTip" ${pr.hoverTip ? "checked" : ""}> نمایش اطلاعات و یادداشت با نگه داشتن موس روی هر نفر</label>
+      <label class="check"><input type="checkbox" name="notesOnTree" ${pr.notesOnTree ? "checked" : ""}> نمایش یادداشت روی کارت‌های شجره‌نامه (در چاپ هم می‌آید)</label>
+      <p class="hint">این تنظیمات برای حساب شما ذخیره می‌شود و روی همهٔ دستگاه‌هایتان اعمال می‌شود.</p>
+      <div class="error"></div>
+    </form>`,
+    foot: `<button class="btn" data-cancel>انصراف</button><button class="btn primary" data-save>ذخیره</button>`,
+  });
+  const form = $("#sf", el);
+  const showSample = () => {
+    const t = $("[data-sample]", el);
+    if (t) t.textContent = lineageName(sample, Number(form.nameGens.value));
+  };
+  form.nameGens.addEventListener("change", showSample);
+  showSample();
+  $("[data-cancel]", el).addEventListener("click", close);
+  $("[data-save]", el).addEventListener("click", async () => {
+    try {
+      await savePrefs({
+        nameGens: Number(form.nameGens.value),
+        orientation: form.orientation.value,
+        hoverTip: form.hoverTip.checked,
+        notesOnTree: form.notesOnTree.checked,
+      });
+      close();
+      updateModeLabel();
+      redraw(true);
+      renderPanel();
+      if (S.selectedId != null) focusFamily(S.selectedId);
+      else S.tree.fit();
+      toast("تنظیمات ذخیره شد");
+    } catch (e) {
+      $(".error", el).textContent = e.message;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// print
+
+const PRINT_LEGEND = `<span><i class="sw male"></i>مرد</span><span><i class="sw female"></i>زن</span>
+  <span><i class="sw rings-sw">⚭</i>ازدواج</span><span><i class="sw ribbon"></i>درگذشته</span>
+  <span><i class="sw marker">۱</i>شمارهٔ یکسان: یک نفر که دو جا آمده (زیر پدر و مادرش و کنار همسرش)</span>
+  <span>▼ ادامهٔ شاخه در صفحهٔ دیگر</span>`;
+
+let printPrep = null;
+
+function buildPrint(opts) {
+  const pr = prefs();
+  const orientation = opts.orientation || pr.orientation;
+  if (!printPrep || printPrep.fam !== S.fam || printPrep.orientation !== orientation || printPrep.notes !== pr.notesOnTree) {
+    printPrep = { ...prepare(S.fam, { orientation, notesOnTree: pr.notesOnTree }), fam: S.fam, notes: pr.notesOnTree };
+  }
+  const plan = planPages(printPrep, { ...opts, to: Math.min(opts.to, printPrep.generations) });
+  renderPages($("#print-root"), plan, printPrep, { title: "شجره‌نامه خاندان", notesOnTree: pr.notesOnTree, legendHtml: PRINT_LEGEND });
+  return plan;
+}
+
+function openPrintDialog() {
+  if (!S.people.length) return toast("شجره‌نامه خالی است");
+  const pr = prefs();
+  const gens = prepare(S.fam, { orientation: pr.orientation, notesOnTree: pr.notesOnTree }).generations;
+  const genOpts = (sel) => Array.from({ length: gens }, (_, i) => `<option value="${i + 1}" ${i + 1 === sel ? "selected" : ""}>نسل ${toFa(i + 1)}</option>`).join("");
+  const { el, close } = modal({
+    title: "چاپ شجره‌نامه",
+    body: `<form id="prf">
+      <div class="row">
+        <label class="field"><span>از نسل</span><select class="input" name="from">${genOpts(1)}</select></label>
+        <label class="field"><span>تا نسل</span><select class="input" name="to">${genOpts(gens)}</select></label>
+      </div>
+      <div class="row">
+        <label class="field"><span>کاغذ</span><select class="input" name="paper">${Object.entries(PAPERS).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join("")}</select></label>
+        <label class="field"><span>چیدمان</span><select class="input" name="orientation">
+          <option value="vertical" ${pr.orientation !== "horizontal" ? "selected" : ""}>عمودی (نسل‌ها بالا به پایین)</option>
+          <option value="horizontal" ${pr.orientation === "horizontal" ? "selected" : ""}>افقی (فرزندان زیر هم)</option>
+        </select></label>
+      </div>
+      <div class="field"><span>تقسیم صفحه‌ها</span>
+        <label class="check"><input type="radio" name="mode" value="auto" checked> خودکار: هر شاخه و زیرشاخه در یک صفحه، با اندازهٔ خوانا
+          <select class="input inline" name="size"><option value="small">ریز</option><option value="medium" selected>متوسط</option><option value="large">درشت</option></select></label>
+        <label class="check"><input type="radio" name="mode" value="count"> تعداد صفحه‌ها: <input class="input inline" type="number" name="pages" min="1" max="200" value="3"></label>
+        <label class="check"><input type="radio" name="mode" value="one"> همه در یک صفحه</label>
+      </div>
+      <div class="result-box" data-summary>…</div>
+      <p class="hint">کسی که هم فرزند یک خانواده است و هم همسر کسی در شاخهٔ دیگر، در چاپ دو جا می‌آید و هر دو کارتش شمارهٔ یکسان دارند.</p>
+    </form>`,
+    foot: `<button class="btn" data-cancel>انصراف</button><button class="btn primary" data-go>چاپ</button>`,
+  });
+  const form = $("#prf", el);
+  const read = () => ({
+    from: Math.min(Number(form.from.value), Number(form.to.value)),
+    to: Math.max(Number(form.from.value), Number(form.to.value)),
+    paper: form.paper.value,
+    orientation: form.orientation.value,
+    mode: form.mode.value,
+    size: form.size.value,
+    pages: Number(form.pages.value) || 1,
+  });
+  let timer;
+  const update = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const plan = buildPrint(read());
+      const minScale = Math.min(...plan.pages.map((p) => p.scale));
+      $("[data-summary]", el).innerHTML = plan.pages.length
+        ? `<b>${toFa(plan.pages.length)} صفحه</b> · کوچک‌ترین اندازهٔ کارت‌ها: ${toFa(Math.round(minScale * 100))}٪${minScale < 0.4 ? ` <span class="error">(ریز است؛ صفحهٔ بیشتر یا کاغذ بزرگ‌تر انتخاب کنید)</span>` : ""}`
+        : "در این بازه کسی نیست.";
+    }, 120);
+  };
+  form.addEventListener("change", update);
+  form.addEventListener("input", update);
+  update();
+  $("[data-cancel]", el).addEventListener("click", () => {
+    $("#print-root").replaceChildren();
+    close();
+  });
+  $("[data-go]", el).addEventListener("click", () => {
+    clearTimeout(timer);
+    const plan = buildPrint(read());
+    if (!plan.pages.length) return;
+    close();
+    window.print();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // search
 
 function initSearch() {
@@ -1291,7 +1486,7 @@ function initSearch() {
     if (!q) return (box.hidden = true);
     const hits = S.people.filter((p) => normalize(`${fullName(p)} ${p.nickname}`).includes(q)).slice(0, 20);
     box.innerHTML = hits.length
-      ? hits.map((p) => `<button data-id="${p.id}">${esc(fullName(p))} <span class="muted">${esc(lifeSpan(p))}</span></button>`).join("")
+      ? hits.map((p) => `<button data-id="${p.id}">${esc(lineageName(p))} <span class="muted">${esc(lifeSpan(p))}</span></button>`).join("")
       : `<div class="muted" style="padding:8px 12px">یافت نشد</div>`;
     box.hidden = false;
     $$("button", box).forEach((b) =>

@@ -10,6 +10,7 @@ export interface User {
   username: string;
   display_name: string;
   role: Role;
+  prefs?: string;
 }
 
 export interface Person {

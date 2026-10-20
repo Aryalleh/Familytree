@@ -3,8 +3,7 @@ import dagre from "../vendor/dagre.esm.js";
 
 export const CARD_W = 172;
 export const CARD_H = 62;
-const SPOUSE_GAP = 46; // room for the wedding rings between spouses
-const RANK_SEP = 78;
+export const CARD_H_NOTES = 84;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 const FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
@@ -26,6 +25,9 @@ export function lifeSpan(p) {
   if (!d) return toFa(p.is_deceased ? `${b} – ؟` : b);
   return toFa(`${b || "؟"} – ${d}`);
 }
+
+const maleFirst = (fam) => (a, b) =>
+  fam.get(a).gender === fam.get(b).gender ? a - b : fam.get(a).gender === "male" ? -1 : 1;
 
 /** Order the members of a marriage component so that spouses sit next to each other. */
 function orderBlock(members, adj) {
@@ -52,16 +54,20 @@ function orderBlock(members, adj) {
 }
 
 /**
- * Married people (and unmarried parent pairs) form one horizontal "block"; dagre ranks the
- * blocks by generation. A cousin marriage just gives a block two parent families — still a DAG.
+ * Married people (and unmarried parent pairs) form one "block"; blocks are ranked by
+ * generation. A cousin marriage gives a block two parent families — still a DAG.
+ *
+ * duplicates (print): every block keeps at most one parent family. Someone who married
+ * into another branch is drawn a second time under their own parents (a "copy", using the
+ * negated person id) and both copies share a numbered marker. The blocks then form a forest,
+ * which is what lets the print view split branches onto pages.
+ *
  * @param {import('./kinship.js').Family} fam  people to draw
  * @param {import('./kinship.js').Family} full the whole family (for consanguinity)
- * @param {{duplicates?: boolean}} opts duplicates: print style — see below
  */
-export function layoutTree(fam, full = fam, { duplicates = false } = {}) {
+export function buildModel(fam, full = fam, { duplicates = false } = {}) {
   const has = (id) => id != null && fam.people.has(id);
 
-  // --- unions (couples & single parents) ---------------------------------
   const couples = new Map();
   for (const m of fam.marriages) {
     couples.set(`${m.husband_id}|${m.wife_id}`, { key: `m${m.id}`, h: m.husband_id, w: m.wife_id, marriage: m, children: [] });
@@ -80,8 +86,10 @@ export function layoutTree(fam, full = fam, { duplicates = false } = {}) {
       singles.get(pid).children.push(p.id);
     }
   }
+  const unions = [...couples.values(), ...singles.values()];
+  for (const u of unions) u.consanguinity = u.marriage ? full.consanguinity(u.marriage) : null;
 
-  // --- blocks: connected components of the marriage graph -----------------
+  // blocks: connected components of the marriage graph
   const adj = new Map([...fam.people.keys()].map((id) => [id, new Set()]));
   for (const c of couples.values()) {
     adj.get(c.h).add(c.w);
@@ -99,19 +107,12 @@ export function layoutTree(fam, full = fam, { duplicates = false } = {}) {
       comp.push(cur);
       for (const n of adj.get(cur)) if (!blockOf.has(n)) (blockOf.set(n, null), stack.push(n));
     }
-    // husbands first by default, so a plain couple reads man | woman before orientation tweaks
-    comp.sort((a, b) => (fam.get(a).gender === fam.get(b).gender ? a - b : fam.get(a).gender === "male" ? -1 : 1));
+    comp.sort(maleFirst(fam));
     const block = { key: `b${blocks.length}`, members: orderBlock(comp, adj) };
-    block.width = block.members.length * CARD_W + (block.members.length - 1) * SPOUSE_GAP;
     blocks.push(block);
     for (const m of block.members) blockOf.set(m, block);
   }
 
-  // --- duplicates (print): every block keeps at most one parent family -----
-  // Someone who married into another branch of the tree (e.g. a cousin) is drawn a second
-  // time under their own parents instead of a long crossing line; both copies share a
-  // numbered marker. Copies use the negated person id.
-  const unions = [...couples.values(), ...singles.values()];
   const markers = new Map();
   if (duplicates) {
     const parentUnion = new Map();
@@ -122,11 +123,11 @@ export function layoutTree(fam, full = fam, { duplicates = false } = {}) {
         return u && blockOf.get(u.h ?? u.single) !== b;
       });
       if (fromOutside.length < 2) continue;
-      fromOutside.sort((a, c) => (fam.get(a).gender === fam.get(c).gender ? a - c : fam.get(a).gender === "male" ? -1 : 1));
+      fromOutside.sort(maleFirst(fam));
       for (const id of fromOutside.slice(1)) {
         const u = parentUnion.get(id);
         u.children = u.children.map((c) => (c === id ? -id : c));
-        const copy = { key: `b${blocks.length}`, members: [-id], width: CARD_W, copy: true };
+        const copy = { key: `b${blocks.length}`, members: [-id], copy: true };
         blocks.push(copy);
         blockOf.set(-id, copy);
         markers.set(id, markers.size + 1);
@@ -134,130 +135,225 @@ export function layoutTree(fam, full = fam, { duplicates = false } = {}) {
     }
   }
 
-  // --- dagre ---------------------------------------------------------------
-  const g = new dagre.graphlib.Graph({ multigraph: true });
-  g.setGraph({ rankdir: "TB", nodesep: 34, ranksep: RANK_SEP, marginx: 40, marginy: 60 });
-  g.setDefaultEdgeLabel(() => ({}));
-  for (const b of blocks) g.setNode(b.key, { width: b.width, height: CARD_H });
+  // block graph: parent block(s) → child blocks
+  const childBlocks = new Map(blocks.map((b) => [b, []]));
+  const parentBlocks = new Map(blocks.map((b) => [b, []]));
   for (const u of unions) {
     const src = blockOf.get(u.h ?? u.single);
     for (const c of u.children) {
       const dst = blockOf.get(c);
-      if (src !== dst) g.setEdge(src.key, dst.key, { minlen: 1, weight: 1 }, `${u.key}>${c}`);
+      if (dst === src) continue;
+      if (!childBlocks.get(src).includes(dst)) childBlocks.get(src).push(dst);
+      if (!parentBlocks.get(dst).includes(src)) parentBlocks.get(dst).push(src);
+    }
+  }
+  return { fam, unions, blocks, blockOf, markers, childBlocks, parentBlocks, genOf: new Map() };
+}
+
+/**
+ * Position a model (or a subset of its blocks) with dagre.
+ * Works in an abstract frame — u: across a generation, v: down the generations — and maps it
+ * to the screen: vertical → (u, v); horizontal → (−v, u), i.e. generations run right-to-left
+ * and children are stacked under each other, which keeps wide families narrow.
+ * @param {{keys?:Set<string>|null, orientation?:'vertical'|'horizontal', cardH?:number}} opts
+ */
+export function positionModel(model, { keys = null, orientation = "vertical", cardH = CARD_H } = {}) {
+  const vertical = orientation !== "horizontal";
+  const cw = CARD_W;
+  const ch = cardH;
+  const cC = vertical ? cw : ch; // card extent across a generation
+  const cM = vertical ? ch : cw; // card extent along the generations
+  const GAP = vertical ? 46 : 34; // between spouses (room for the rings)
+  const RANK_SEP = vertical ? 78 : 76;
+  const map = vertical ? (u, v) => ({ x: u, y: v }) : (u, v) => ({ x: -v, y: u });
+
+  const blocks = keys ? model.blocks.filter((b) => keys.has(b.key)) : model.blocks;
+  const inSet = new Set(blocks);
+  const { blockOf } = model;
+  const size = (b) => b.members.length * cC + (b.members.length - 1) * GAP;
+
+  const g = new dagre.graphlib.Graph({ multigraph: true });
+  g.setGraph({ rankdir: "TB", nodesep: vertical ? 34 : 18, ranksep: RANK_SEP, marginx: 0, marginy: 0 });
+  g.setDefaultEdgeLabel(() => ({}));
+  for (const b of blocks) g.setNode(b.key, { width: size(b), height: cM });
+  const unions = model.unions.filter((u) => inSet.has(blockOf.get(u.h ?? u.single)));
+  for (const u of unions) {
+    const src = blockOf.get(u.h ?? u.single);
+    for (const c of u.children) {
+      const dst = blockOf.get(c);
+      if (dst !== src && inSet.has(dst)) g.setEdge(src.key, dst.key, { minlen: 1, weight: 1 }, `${u.key}>${c}`);
     }
   }
   dagre.layout(g);
 
-  // --- positions -------------------------------------------------------------
-  const pos = new Map();
+  // abstract positions of every member
+  const ap = new Map();
+  const order = new Map(blocks.map((b) => [b, [...b.members]]));
   const place = (b) => {
     const n = g.node(b.key);
-    const left = n.x - b.width / 2;
-    b.x = n.x;
-    b.y = n.y;
-    b.members.forEach((id, i) => pos.set(id, { x: left + i * (CARD_W + SPOUSE_GAP) + CARD_W / 2, y: n.y }));
+    const start = n.x - size(b) / 2;
+    order.get(b).forEach((id, i) => ap.set(id, { u: start + i * (cC + GAP) + cC / 2, v: n.y }));
   };
   const unionOfChild = new Map();
   for (const u of unions) for (const c of u.children) unionOfChild.set(c, u);
-  const dropX = (u) => (u.single != null ? pos.get(u.single).x : (pos.get(u.h).x + pos.get(u.w).x) / 2);
+  const dropU = (u) => (u.single != null ? ap.get(u.single).u : (ap.get(u.h).u + ap.get(u.w).u) / 2);
 
-  // Top-down, mirror a block when that brings its members closer to their own parents.
-  blocks.sort((a, b) => g.node(a.key).y - g.node(b.key).y);
-  for (const b of blocks) {
+  // Generation by generation, mirror a block when that brings members closer to their parents.
+  const sorted = [...blocks].sort((a, b) => g.node(a.key).y - g.node(b.key).y);
+  for (const b of sorted) {
     place(b);
     if (b.members.length < 2) continue;
     const cost = () =>
-      b.members.reduce((s, id) => {
+      order.get(b).reduce((s, id) => {
         const u = unionOfChild.get(id);
-        return u && pos.has(u.h ?? u.single) && blockOf.get(u.h ?? u.single) !== b ? s + Math.abs(pos.get(id).x - dropX(u)) : s;
+        const src = u && blockOf.get(u.h ?? u.single);
+        return src && src !== b && inSet.has(src) ? s + Math.abs(ap.get(id).u - dropU(u)) : s;
       }, 0);
     const before = cost();
-    b.members.reverse();
+    order.get(b).reverse();
     place(b);
     if (cost() >= before) {
-      b.members.reverse();
+      order.get(b).reverse();
       place(b);
     }
   }
 
-  // --- union drop points ----------------------------------------------------
+  const pt = (u, v) => {
+    const q = map(u, v);
+    return `${q.x},${q.y}`;
+  };
+  const pathOf = (cmds) => cmds.map(([c, ...pts]) => c + pts.map((p) => pt(p[0], p[1])).join(" ")).join(" ");
+
+  // unions: drop point, spouse line
+  const out = [];
   for (const u of unions) {
+    const r = { ...u };
     if (u.single != null) {
-      const p = pos.get(u.single);
-      Object.assign(u, { x: p.x, y: p.y + CARD_H / 2, kind: "single" });
-      continue;
-    }
-    const b = blockOf.get(u.h);
-    const adjacent = Math.abs(b.members.indexOf(u.h) - b.members.indexOf(u.w)) === 1;
-    const [h, w] = [pos.get(u.h), pos.get(u.w)];
-    u.kind = adjacent ? "ring" : "arc";
-    u.x = (h.x + w.x) / 2;
-    u.y = adjacent ? h.y : h.y + CARD_H / 2 + 18;
-    u.consanguinity = u.marriage ? full.consanguinity(u.marriage) : null;
-  }
-
-  // --- connectors to children ---------------------------------------------
-  const links = [];
-  for (const u of unions) {
-    const src = blockOf.get(u.h ?? u.single);
-    for (const c of u.children) {
-      const p = pos.get(c);
-      const top = p.y - CARD_H / 2;
-      const rowBottom = src.y + CARD_H / 2;
-      const long = top - rowBottom > RANK_SEP + 8;
-      let d;
-      if (!long) {
-        const bus = rowBottom + (top - rowBottom) / 2;
-        d = `M${u.x},${u.y} V${bus} H${p.x} V${top}`;
+      const p = ap.get(u.single);
+      Object.assign(r, { du: p.u, dv: p.v + cM / 2, kind: "single" });
+    } else {
+      const b = blockOf.get(u.h);
+      const o = order.get(b);
+      const adjacent = Math.abs(o.indexOf(u.h) - o.indexOf(u.w)) === 1;
+      const [h, w] = [ap.get(u.h), ap.get(u.w)];
+      r.kind = adjacent ? "ring" : "arc";
+      r.du = (h.u + w.u) / 2;
+      r.dv = adjacent ? h.v : h.v + cM / 2 + 18;
+      if (adjacent) {
+        const [a, c] = h.u < w.u ? [h.u + cC / 2, w.u - cC / 2] : [w.u + cC / 2, h.u - cC / 2];
+        r.spousePath = pathOf([["M", [a, h.v]], ["L", [c, h.v]]]);
       } else {
-        const e = blockOf.get(c) !== src ? g.edge(src.key, blockOf.get(c).key, `${u.key}>${c}`) : null;
-        const mids = (e?.points || []).slice(1, -1);
-        const pts = [{ x: u.x, y: rowBottom + 16 }, ...mids, { x: p.x, y: top - 16 }];
-        d = `M${u.x},${u.y} V${pts[0].y}`;
-        for (let i = 1; i < pts.length; i++) {
-          const a = pts[i - 1];
-          const b2 = pts[i];
-          const my = (a.y + b2.y) / 2;
-          d += ` C${a.x},${my} ${b2.x},${my} ${b2.x},${b2.y}`;
-        }
-        d += ` V${top}`;
+        const bv = h.v + cM / 2;
+        r.spousePath = pathOf([["M", [h.u, bv]], ["C", [h.u, bv + 26], [w.u, bv + 26], [w.u, bv]]]);
       }
-      links.push({ d, union: u, child: c, long });
+    }
+    const q = map(r.du, r.dv);
+    r.x = q.x;
+    r.y = q.y;
+    r.cut = u.children.some((c) => !inSet.has(blockOf.get(c)));
+    out.push(r);
+  }
+
+  // connectors to children
+  const links = [];
+  for (const u of out) {
+    const src = blockOf.get(u.h ?? u.single);
+    const rowEnd = g.node(src.key).y + cM / 2;
+    for (const c of u.children) {
+      const dst = blockOf.get(c);
+      if (!inSet.has(dst) || dst === src) continue;
+      const p = ap.get(c);
+      const top = p.v - cM / 2;
+      const long = top - rowEnd > RANK_SEP + 8;
+      let cmds;
+      if (!long) {
+        const bus = rowEnd + (top - rowEnd) / 2;
+        cmds = [["M", [u.du, u.dv]], ["L", [u.du, bus]], ["L", [p.u, bus]], ["L", [p.u, top]]];
+      } else {
+        const e = g.edge(src.key, dst.key, `${u.key}>${c}`);
+        const mids = (e?.points || []).slice(1, -1).map((q) => [q.x, q.y]);
+        const pts = [[u.du, rowEnd + 16], ...mids, [p.u, top - 16]];
+        cmds = [["M", [u.du, u.dv]], ["L", pts[0]]];
+        for (let i = 1; i < pts.length; i++) {
+          const [a, b] = [pts[i - 1], pts[i]];
+          const my = (a[1] + b[1]) / 2;
+          cmds.push(["C", [a[0], my], [b[0], my], b]);
+        }
+        cmds.push(["L", [p.u, top]]);
+      }
+      links.push({ d: pathOf(cmds), union: u, child: c, long });
     }
   }
 
-  // --- generation rows -------------------------------------------------------
+  // generation rows (labels sit before the first block of each row)
   const rowMap = new Map();
+  let minU = Infinity;
   for (const b of blocks) {
-    const y = Math.round(b.y);
-    if (!rowMap.has(y)) rowMap.set(y, []);
-    rowMap.get(y).push(...b.members);
+    const n = g.node(b.key);
+    minU = Math.min(minU, n.x - size(b) / 2);
+    const v = Math.round(n.y);
+    if (!rowMap.has(v)) rowMap.set(v, []);
+    rowMap.get(v).push(b);
   }
+  const labelU = minU - (vertical ? 100 : 50);
   const rows = [...rowMap.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([y, ids], i) => {
-      const years = ids.filter((id) => id > 0).map((id) => yearOf(fam.get(id).birth_date)).filter((x) => x);
+    .map(([v, bs], i) => {
+      const ids = bs.flatMap((b) => b.members).filter((id) => id > 0);
+      const years = ids.map((id) => yearOf(model.fam.get(id).birth_date)).filter((x) => x);
       const avg = years.length ? Math.round(years.reduce((s, x) => s + x, 0) / years.length / 10) * 10 : null;
-      return { y, gen: i + 1, year: avg };
+      const gen = Math.min(...bs.map((b) => model.genOf.get(b.key) ?? i + 1));
+      const q = map(labelU, v);
+      return { v, x: q.x, y: q.y, gen, year: avg, blocks: bs };
     });
 
-  const gg = g.graph();
-  const LABEL_COL = 150;
+  // screen positions and bounds
+  const pos = new Map();
+  const blockPos = new Map();
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const grow = (x, y, hw, hh) => {
+    x0 = Math.min(x0, x - hw);
+    x1 = Math.max(x1, x + hw);
+    y0 = Math.min(y0, y - hh);
+    y1 = Math.max(y1, y + hh);
+  };
+  for (const [id, a] of ap) {
+    const q = map(a.u, a.v);
+    pos.set(id, q);
+    grow(q.x, q.y, cw / 2, ch / 2 + 14);
+  }
+  for (const b of blocks) {
+    const n = g.node(b.key);
+    blockPos.set(b.key, { center: map(n.x, n.y), after: map(n.x, n.y + cM / 2 + 22) });
+  }
+  for (const r of rows) grow(r.x, r.y, 62, 24);
+  const M = 30;
   return {
+    model,
+    orientation: vertical ? "vertical" : "horizontal",
+    cw,
+    ch,
     pos,
+    blockPos,
     blocks,
-    unions,
-    markers,
+    unions: out,
     links,
     rows,
-    labelX: -LABEL_COL / 2,
-    bounds: { x: -LABEL_COL, y: 0, w: (gg.width || 400) + LABEL_COL, h: gg.height || 300 },
+    markers: model.markers,
+    bounds: { x: x0 - M, y: y0 - M, w: x1 - x0 + 2 * M, h: y1 - y0 + 2 * M },
   };
 }
 
-// ---------------------------------------------------------------------------
+/** Convenience: model + positions in one go. */
+export function layoutTree(fam, full = fam, opts = {}) {
+  const model = buildModel(fam, full, opts);
+  return positionModel(model, opts);
+}
 
-function el(tag, attrs = {}, parent) {
+// ---------------------------------------------------------------------------
+// drawing
+
+export function el(tag, attrs = {}, parent) {
   const e = document.createElementNS(SVG_NS, tag);
   for (const [k, v] of Object.entries(attrs)) if (v !== undefined && v !== null && v !== false) e.setAttribute(k, String(v));
   if (parent) parent.appendChild(e);
@@ -283,8 +379,6 @@ function fitText(t, maxW) {
   let n = Math.floor((full.length * maxW) / len);
   t.textContent = full.slice(0, n) + "…";
   while (n > 1 && t.getComputedTextLength() > maxW) t.textContent = full.slice(0, --n) + "…";
-  const tip = el("title", {}, t);
-  tip.textContent = full;
 }
 
 function rings(parent, x, y, cls) {
@@ -295,149 +389,187 @@ function rings(parent, x, y, cls) {
   return g;
 }
 
+/**
+ * Draw a positioned layout into `root` (an SVG <g>).
+ * @param {object} L  result of positionModel
+ * @param {object} state  {defs, focusId, selectedId, kin, highlight, highlightUnions, relationsTo, notesOnTree, cont}
+ * @param {object} on  event handlers {person(id), union(u), hover(p, evt|null)}
+ */
+export function drawLayout(root, L, state = {}, on = {}) {
+  const fam = L.model.fam;
+  const { pos, cw, ch } = L;
+  root.replaceChildren();
+  const rowLayer = el("g", { class: "rows" }, root);
+  const linkLayer = el("g", { class: "links" }, root);
+  const unionLayer = el("g", { class: "unions" }, root);
+  const cardLayer = el("g", { class: "cards" }, root);
+  const hl = state.highlight || new Set();
+  const hlUnions = state.highlightUnions || new Set();
+  const kin = state.kin || new Set();
+  const defs = state.defs || "tv";
+
+  for (const r of L.rows) {
+    const g = el("g", { class: "gen-label", transform: `translate(${r.x},${r.y})` }, rowLayer);
+    el("rect", { x: -62, y: -24, width: 124, height: 48, rx: 10 }, g);
+    text(g, `نسل ${toFa(r.gen)}`, { "text-anchor": "middle", y: r.year ? -4 : 5, class: "gen-title" });
+    if (r.year) text(g, `(حدود ${toFa(r.year)})`, { "text-anchor": "middle", y: 15, class: "gen-year" });
+  }
+
+  for (const l of L.links) {
+    const cls = ["child-line", l.long ? "long" : "", hlUnions.has(l.union.key) && hl.has(Math.abs(l.child)) ? "hl" : ""];
+    el("path", { d: l.d, class: cls.filter(Boolean).join(" ") }, linkLayer);
+  }
+
+  for (const u of L.unions) {
+    if (u.kind === "single") continue;
+    const status = u.marriage?.status || "implicit";
+    el("path", { d: u.spousePath, class: ["spouse-line", status, hlUnions.has(u.key) ? "hl" : ""].filter(Boolean).join(" ") }, linkLayer);
+    if (!u.marriage) continue;
+    const g = rings(unionLayer, u.x, u.y, status);
+    if (on.union) {
+      g.setAttribute("tabindex", "0");
+      g.addEventListener("click", (e) => {
+        e.stopPropagation();
+        on.union(u);
+      });
+    }
+    el("title", {}, g).textContent = "ازدواج";
+  }
+
+  // "continued on page n" notes (print)
+  if (state.cont) {
+    for (const [key, label] of state.cont) {
+      const bp = L.blockPos.get(key);
+      if (!bp) continue;
+      const g = el("g", { class: "cont-label", transform: `translate(${bp.after.x},${bp.after.y})` }, unionLayer);
+      text(g, label, { "text-anchor": "middle", dy: "0.35em", direction: "rtl" });
+    }
+  }
+
+  const entries = [...fam.people.values()].filter((p) => pos.has(p.id)).map((p) => ({ p, key: p.id, copy: false }));
+  for (const b of L.blocks) if (b.copy) entries.push({ p: fam.get(-b.members[0]), key: b.members[0], copy: true });
+  for (const { p, key, copy } of entries) {
+    const { x, y } = pos.get(key);
+    const rels = state.relationsTo ? state.relationsTo(p.id) : [];
+    const primary = rels[0];
+    const classes = [
+      "card",
+      p.gender,
+      copy ? "copy" : "",
+      p.is_deceased ? "deceased" : "",
+      p.id === state.selectedId ? "selected" : "",
+      kin.has(p.id) ? "kin" : "",
+      p.id === state.focusId ? "focus" : "",
+      hl.size && !hl.has(p.id) ? "dim" : "",
+      hl.has(p.id) ? "hl" : "",
+    ];
+    const g = el("g", { class: classes.filter(Boolean).join(" "), transform: `translate(${x - cw / 2},${y - ch / 2})` }, cardLayer);
+    if (on.person) {
+      g.setAttribute("tabindex", "0");
+      g.setAttribute("role", "button");
+      g.addEventListener("click", (e) => {
+        e.stopPropagation();
+        on.person(p.id);
+      });
+      g.addEventListener("keydown", (e) => e.key === "Enter" && on.person(p.id));
+    }
+    if (on.hover) {
+      g.addEventListener("pointerenter", (e) => e.pointerType === "mouse" && on.hover(p, e, rels));
+      g.addEventListener("pointermove", (e) => e.pointerType === "mouse" && on.hover(p, e, rels));
+      g.addEventListener("pointerleave", () => on.hover(null));
+    }
+    el("rect", { width: cw, height: ch, rx: 12, class: "card-bg", filter: state.shadow === false ? null : `url(#${defs}-shadow)` }, g);
+
+    // avatar on the left, text on the right (RTL)
+    const ag = el("g", { transform: `translate(32,${Math.min(ch / 2, 31)})` }, g);
+    el("circle", { r: 21, class: "avatar-bg" }, ag);
+    if (p.photo_url) {
+      el("image", { href: p.photo_url, x: -20, y: -20, width: 40, height: 40, "clip-path": `url(#${defs}-clip)`, preserveAspectRatio: "xMidYMid slice" }, ag);
+    } else {
+      const sil = el("g", { "clip-path": `url(#${defs}-clip)`, class: "silhouette" }, ag);
+      el("circle", { cy: -5, r: 8 }, sil);
+      el("ellipse", { cy: 17, rx: 15, ry: 11 }, sil);
+    }
+    if (p.is_deceased) el("path", { d: "M9,-20 L20,-9 L20,-4 L4,-20 Z", class: "ribbon" }, ag);
+
+    const name = `${p.first_name} ${p.last_name || ""}`.trim();
+    const maxW = cw - 12 - 62;
+    fitText(text(g, name, { x: cw - 12, y: 27, class: "card-name", "text-anchor": "start", direction: "rtl" }), maxW);
+    const span = lifeSpan(p);
+    if (span) fitText(text(g, `(${span})`, { x: cw - 12, y: 47, class: "card-sub", "text-anchor": "start", direction: "rtl" }), maxW);
+    if (p.notes) {
+      if (state.notesOnTree) {
+        const note = p.notes.replace(/\s+/g, " ");
+        fitText(text(g, note, { x: cw - 12, y: 72, class: "card-note", "text-anchor": "start", direction: "rtl" }), cw - 24);
+      } else {
+        text(g, "✎", { x: 10, y: ch - 8, class: "note-icon" });
+      }
+    }
+
+    if (primary) {
+      const extra = rels.length > 1 ? ` +${toFa(rels.length - 1)}` : "";
+      const label = primary.kind === "self" ? "★ من" : primary.label + extra;
+      const bw = Math.min(label.length * 7 + 20, cw);
+      const bg = el("g", { class: `rel-badge kind-${primary.kind}`, transform: `translate(${cw / 2},0)` }, g);
+      el("rect", { x: -bw / 2, y: -11, width: bw, height: 21, rx: 10.5 }, bg);
+      text(bg, label, { "text-anchor": "middle", dy: "0.35em", direction: "rtl" });
+    }
+    const marker = L.markers.get(p.id);
+    if (marker) {
+      // same number on both copies of a person drawn twice (print view)
+      const mg = el("g", { class: "dup-marker", transform: "translate(4,4)" }, g);
+      el("circle", { r: 11 }, mg);
+      text(mg, toFa(marker), { "text-anchor": "middle", dy: "0.36em" });
+    }
+  }
+}
+
+/**
+ * Shadow filter and avatar clip for one <svg>. Ids must be unique per document: a reference
+ * to an id inside a hidden svg (e.g. the screen tree while printing) renders nothing.
+ */
+export function svgDefs(svg, prefix) {
+  const defs = el("defs", {}, svg);
+  const f = el("filter", { id: `${prefix}-shadow`, x: "-20%", y: "-30%", width: "140%", height: "170%" }, defs);
+  el("feDropShadow", { dx: 0, dy: 2, stdDeviation: 2.5, "flood-color": "#0f172a", "flood-opacity": 0.12 }, f);
+  const clip = el("clipPath", { id: `${prefix}-clip` }, defs);
+  el("circle", { cx: 0, cy: 0, r: 20 }, clip);
+  return prefix;
+}
+
+// ---------------------------------------------------------------------------
+
 export class TreeView {
   /**
    * @param {SVGSVGElement} svg
-   * @param {{onSelectPerson:Function, onSelectUnion:Function, onBackground:Function, minimap?:SVGSVGElement, insets?:()=>{top:number,right:number,bottom:number,left:number}}} opts
+   * @param {{onSelectPerson:Function, onSelectUnion:Function, onBackground:Function, onHover?:Function, minimap?:SVGSVGElement, insets?:()=>{top:number,right:number,bottom:number,left:number}}} opts
    */
   constructor(svg, opts) {
     this.svg = svg;
     this.opts = opts;
     this.view = { x: 0, y: 0, k: 1 };
     this.layout = null;
-    this._initDefs();
+    this.defs = svgDefs(svg, "tv");
     this.viewport = el("g", { class: "viewport" }, svg);
     this._initPanZoom();
     if (opts.minimap) this._initMinimap(opts.minimap);
     new ResizeObserver(() => this._apply()).observe(svg);
   }
 
-  _initDefs() {
-    const defs = el("defs", {}, this.svg);
-    const f = el("filter", { id: "card-shadow", x: "-20%", y: "-30%", width: "140%", height: "170%" }, defs);
-    el("feDropShadow", { dx: 0, dy: 2, stdDeviation: 2.5, "flood-color": "#0f172a", "flood-opacity": 0.12 }, f);
-    const clip = el("clipPath", { id: "avatar-clip" }, defs);
-    el("circle", { cx: 0, cy: 0, r: 20 }, clip);
-  }
-
   /**
    * @param {import('./kinship.js').Family} fam   people to draw
    * @param {import('./kinship.js').Family} full  whole family
    */
-  render(fam, full, state, { relayout = true, duplicates = false } = {}) {
-    if (relayout || !this.layout) this.layout = layoutTree(fam, full, { duplicates });
-    const L = this.layout;
-    const { pos } = L;
-    this.viewport.replaceChildren();
-    const rowLayer = el("g", { class: "rows" }, this.viewport);
-    const linkLayer = el("g", { class: "links" }, this.viewport);
-    const unionLayer = el("g", { class: "unions" }, this.viewport);
-    const cardLayer = el("g", { class: "cards" }, this.viewport);
-    const hl = state.highlight || new Set();
-    const hlUnions = state.highlightUnions || new Set();
-    const kin = state.kin || new Set();
-
-    // generation labels
-    for (const r of L.rows) {
-      const g = el("g", { class: "gen-label", transform: `translate(${L.labelX},${r.y})` }, rowLayer);
-      el("rect", { x: -62, y: -24, width: 124, height: 48, rx: 10 }, g);
-      text(g, `نسل ${toFa(r.gen)}`, { "text-anchor": "middle", y: r.year ? -4 : 5, class: "gen-title" });
-      if (r.year) text(g, `(حدود ${toFa(r.year)})`, { "text-anchor": "middle", y: 15, class: "gen-year" });
+  render(fam, full, state, { relayout = true, orientation = "vertical" } = {}) {
+    if (relayout || !this.layout) {
+      this.layout = layoutTree(fam, full, { orientation, cardH: state.notesOnTree ? CARD_H_NOTES : CARD_H });
     }
-
-    for (const l of L.links) {
-      const cls = ["child-line", l.long ? "long" : "", hlUnions.has(l.union.key) && hl.has(Math.abs(l.child)) ? "hl" : ""];
-      el("path", { d: l.d, class: cls.filter(Boolean).join(" ") }, linkLayer);
-    }
-
-    for (const u of L.unions) {
-      if (u.kind === "single") continue;
-      const status = u.marriage?.status || "implicit";
-      const h = pos.get(u.h);
-      const w = pos.get(u.w);
-      const base = ["spouse-line", status, hlUnions.has(u.key) ? "hl" : ""].filter(Boolean).join(" ");
-      if (u.kind === "ring") {
-        const [x1, x2] = h.x < w.x ? [h.x + CARD_W / 2, w.x - CARD_W / 2] : [w.x + CARD_W / 2, h.x - CARD_W / 2];
-        el("line", { x1, y1: u.y, x2, y2: u.y, class: base }, linkLayer);
-      } else {
-        const by = h.y + CARD_H / 2;
-        el("path", { d: `M${h.x},${by} C${h.x},${u.y + 8} ${w.x},${u.y + 8} ${w.x},${by}`, class: base }, linkLayer);
-      }
-      if (!u.marriage) continue;
-      const g = rings(unionLayer, u.x, u.y, status);
-      g.setAttribute("tabindex", "0");
-      g.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.opts.onSelectUnion(u);
-      });
-      const title = el("title", {}, g);
-      title.textContent = "ازدواج";
-    }
-
-    const entries = [...fam.people.values()].map((p) => ({ p, key: p.id, copy: false }));
-    for (const b of L.blocks) if (b.copy) entries.push({ p: fam.get(-b.members[0]), key: b.members[0], copy: true });
-    for (const { p, key, copy } of entries) {
-      const { x, y } = pos.get(key);
-      const rels = state.relationsTo ? state.relationsTo(p.id) : [];
-      const primary = rels[0];
-      const classes = [
-        "card",
-        p.gender,
-        copy ? "copy" : "",
-        p.is_deceased ? "deceased" : "",
-        p.id === state.selectedId ? "selected" : "",
-        kin.has(p.id) ? "kin" : "",
-        p.id === state.focusId ? "focus" : "",
-        hl.size && !hl.has(p.id) ? "dim" : "",
-        hl.has(p.id) ? "hl" : "",
-      ];
-      const g = el("g", { class: classes.filter(Boolean).join(" "), transform: `translate(${x - CARD_W / 2},${y - CARD_H / 2})`, tabindex: 0, role: "button" }, cardLayer);
-      g.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.opts.onSelectPerson(p.id);
-      });
-      g.addEventListener("keydown", (e) => e.key === "Enter" && this.opts.onSelectPerson(p.id));
-      el("rect", { width: CARD_W, height: CARD_H, rx: 12, class: "card-bg", filter: "url(#card-shadow)" }, g);
-
-      // avatar on the left, text on the right (RTL)
-      const ag = el("g", { transform: `translate(32,${CARD_H / 2})` }, g);
-      el("circle", { r: 21, class: "avatar-bg" }, ag);
-      if (p.photo_url) {
-        el("image", { href: p.photo_url, x: -20, y: -20, width: 40, height: 40, "clip-path": "url(#avatar-clip)", preserveAspectRatio: "xMidYMid slice" }, ag);
-      } else {
-        const sil = el("g", { "clip-path": "url(#avatar-clip)", class: "silhouette" }, ag);
-        el("circle", { cy: -5, r: 8 }, sil);
-        el("ellipse", { cy: 17, rx: 15, ry: 11 }, sil);
-      }
-      if (p.is_deceased) el("path", { d: "M9,-20 L20,-9 L20,-4 L4,-20 Z", class: "ribbon" }, ag);
-
-      const name = `${p.first_name} ${p.last_name || ""}`.trim();
-      const maxW = CARD_W - 12 - 62;
-      fitText(text(g, name, { x: CARD_W - 12, y: 27, class: "card-name", "text-anchor": "start", direction: "rtl" }), maxW);
-      const span = lifeSpan(p);
-      if (span) fitText(text(g, `(${span})`, { x: CARD_W - 12, y: 47, class: "card-sub", "text-anchor": "start", direction: "rtl" }), maxW);
-      const tip = el("title", {}, g);
-      tip.textContent = rels.length ? `${name}\n${rels.map((r) => r.label).join("، ")}` : name;
-
-      if (primary) {
-        const extra = rels.length > 1 ? ` +${toFa(rels.length - 1)}` : "";
-        const label = primary.kind === "self" ? "★ من" : primary.label + extra;
-        const bw = Math.min(label.length * 7 + 20, CARD_W);
-        const bg = el("g", { class: `rel-badge kind-${primary.kind}`, transform: `translate(${CARD_W / 2},0)` }, g);
-        el("rect", { x: -bw / 2, y: -11, width: bw, height: 21, rx: 10.5 }, bg);
-        text(bg, label, { "text-anchor": "middle", dy: "0.35em", direction: "rtl" });
-      }
-      const marker = L.markers.get(p.id);
-      if (marker) {
-        // same number on both copies of a person drawn twice (print view)
-        const mg = el("g", { class: "dup-marker", transform: "translate(4,4)" }, g);
-        el("circle", { r: 11 }, mg);
-        text(mg, toFa(marker), { "text-anchor": "middle", dy: "0.36em" });
-        const mt = el("title", {}, mg);
-        mt.textContent = copy ? "همین شخص در جای دیگر درخت، کنار همسرش، هم آمده است" : "همین شخص زیر خانوادهٔ پدر و مادرش هم آمده است";
-      }
-    }
-    this._renderMinimap(fam);
+    drawLayout(this.viewport, this.layout, { ...state, defs: this.defs }, {
+      person: (id) => this.opts.onSelectPerson(id),
+      union: (u) => this.opts.onSelectUnion(u),
+      hover: this.opts.onHover,
+    });
+    this._renderMinimap();
     this._apply();
   }
 
@@ -454,22 +586,7 @@ export class TreeView {
     return { x: i.left, y: i.top, w: Math.max(80, r.width - i.left - i.right), h: Math.max(80, r.height - i.top - i.bottom) };
   }
 
-  /** Print: show the whole tree scaled to the page via viewBox instead of the camera. */
-  setPrintView(on) {
-    this.printing = on;
-    if (on && this.layout) {
-      const b = this.layout.bounds;
-      this.svg.setAttribute("viewBox", `${b.x} ${b.y} ${b.w} ${b.h}`);
-      this.svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
-      this.viewport.removeAttribute("transform");
-    } else {
-      this.svg.removeAttribute("viewBox");
-      this._apply();
-    }
-  }
-
   _apply() {
-    if (this.printing) return;
     const { x, y, k } = this.view;
     this.viewport.setAttribute("transform", `translate(${x},${y}) scale(${k})`);
     this._updateMinimapView();
@@ -506,14 +623,15 @@ export class TreeView {
     if (this.layout) this.fitBox(this.layout.bounds, { pad: 24, maxK: 1, animate });
   }
 
-  /** Box around the given people (cards plus badges/labels above them). */
+  /** Box around the given people (cards plus badges above them). */
   boxOf(ids) {
-    const pts = ids.map((id) => this.layout?.pos.get(id)).filter(Boolean);
+    const L = this.layout;
+    const pts = ids.map((id) => L?.pos.get(id)).filter(Boolean);
     if (!pts.length) return null;
-    const x0 = Math.min(...pts.map((p) => p.x)) - CARD_W / 2;
-    const x1 = Math.max(...pts.map((p) => p.x)) + CARD_W / 2;
-    const y0 = Math.min(...pts.map((p) => p.y)) - CARD_H / 2 - 44;
-    const y1 = Math.max(...pts.map((p) => p.y)) + CARD_H / 2 + 8;
+    const x0 = Math.min(...pts.map((p) => p.x)) - L.cw / 2;
+    const x1 = Math.max(...pts.map((p) => p.x)) + L.cw / 2;
+    const y0 = Math.min(...pts.map((p) => p.y)) - L.ch / 2 - 44;
+    const y1 = Math.max(...pts.map((p) => p.y)) + L.ch / 2 + 8;
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
 
@@ -575,7 +693,10 @@ export class TreeView {
         const dx = e.clientX - last.x;
         const dy = e.clientY - last.y;
         if (!moved && Math.hypot(dx, dy) < 5) return;
-        if (!moved) svg.setPointerCapture(e.pointerId);
+        if (!moved) {
+          svg.setPointerCapture(e.pointerId);
+          this.opts.onHover?.(null);
+        }
         moved = true;
         svg.classList.add("panning");
         this.view.x += dx;
@@ -643,15 +764,16 @@ export class TreeView {
     mini.addEventListener("pointercancel", () => (dragging = false));
   }
 
-  _renderMinimap(fam) {
-    if (!this.mini || !this.layout) return;
-    const b = this.layout.bounds;
+  _renderMinimap() {
+    const L = this.layout;
+    if (!this.mini || !L) return;
+    const b = L.bounds;
     this.mini.setAttribute("viewBox", `${b.x} ${b.y} ${b.w} ${b.h}`);
     this.miniContent.replaceChildren();
-    for (const l of this.layout.links) el("path", { d: l.d, class: "mini-link" }, this.miniContent);
-    for (const p of fam.people.values()) {
-      const q = this.layout.pos.get(p.id);
-      el("rect", { x: q.x - CARD_W / 2, y: q.y - CARD_H / 2, width: CARD_W, height: CARD_H, rx: 10, class: `mini-card ${p.gender}` }, this.miniContent);
+    for (const l of L.links) el("path", { d: l.d, class: "mini-link" }, this.miniContent);
+    for (const [id, q] of L.pos) {
+      const p = L.model.fam.get(Math.abs(id));
+      el("rect", { x: q.x - L.cw / 2, y: q.y - L.ch / 2, width: L.cw, height: L.ch, rx: 10, class: `mini-card ${p.gender}` }, this.miniContent);
     }
   }
 
