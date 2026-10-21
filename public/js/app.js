@@ -153,41 +153,9 @@ const DEFAULT_PREFS = { nameGens: 2, orientation: "vertical", hoverTip: true, no
 
 const ORDINAL_FA = ["", "اول", "دوم", "سوم", "چهارم", "پنجم", "ششم", "هفتم", "هشتم", "نهم", "دهم"];
 
-/** Children of a parent, each with ▲▼ to change their order (when the user may edit them). */
+/** Children of a parent, in birth order. */
 function childRows(children) {
-  const movable = children.length > 1 && children.every((c) => canEditPerson(c));
-  return children
-    .map(
-      (c, i) => `<div class="child-row">${prow(c, person(c).gender === "male" ? "♂ پسر" : "♀ دختر")}${
-        movable
-          ? `<span class="reorder"><button class="btn ghost small" data-move="${i}" data-dir="-1" title="بزرگ‌تر" ${i === 0 ? "disabled" : ""}>▲</button><button class="btn ghost small" data-move="${i}" data-dir="1" title="کوچک‌تر" ${i === children.length - 1 ? "disabled" : ""}>▼</button></span>`
-          : ""
-      }</div>`,
-    )
-    .join("");
-}
-
-/** ▲▼ swap two children and save the whole order as «فرزند چندم» 1..n. */
-function bindReorder(panel, children) {
-  $$("[data-move]", panel).forEach((b) =>
-    b.addEventListener("click", async () => {
-      const i = Number(b.dataset.move);
-      const j = i + Number(b.dataset.dir);
-      const order = [...children];
-      [order[i], order[j]] = [order[j], order[i]];
-      try {
-        for (const [k, id] of order.entries()) {
-          const c = person(id);
-          if (c.birth_order === k + 1) continue;
-          if (!(await saveWithConflicts("PUT", `/api/people/${id}`, { birth_order: k + 1, base_version: c.version }))) return;
-        }
-        await loadTree();
-        if (prefs().siblingOrder !== "birth") toast("ترتیب ذخیره شد. برای دیدنش روی درخت، در تنظیمات «به ترتیب تولد» را انتخاب کنید");
-      } catch (e) {
-        toast(e.message, true);
-      }
-    }),
-  );
+  return children.map((c) => prow(c, person(c).gender === "male" ? "♂ پسر" : "♀ دختر")).join("");
 }
 
 /** «فرزند چندم» for a parent's next child: after the ones already there. */
@@ -938,6 +906,7 @@ function renderPanel() {
       ${childRank(p)}
       ${p.birth_date ? `<dt>تولد</dt><dd>${esc(toFa(p.birth_date))}</dd>` : ""}
       ${p.birth_place ? `<dt>محل تولد</dt><dd>${esc(p.birth_place)}</dd>` : ""}
+      ${p.phone ? `<dt>شمارهٔ تماس</dt><dd><a href="tel:${esc(p.phone.replace(/[^\d+]/g, ""))}" dir="ltr">${esc(p.phone)}</a></dd>` : ""}
       ${p.is_deceased ? `<dt>وفات</dt><dd>${esc(toFa(p.death_date) || "درگذشته")}</dd>` : ""}
       <dt>شناسه</dt><dd>P-${toFa(String(p.id).padStart(4, "0"))}</dd>
       ${auditLines(p.id)}
@@ -1045,7 +1014,6 @@ function renderPanel() {
   $("[data-act=open-clan]", panel)?.addEventListener("click", () => setClan(p.clan_id));
   $("[data-act=move]", panel)?.addEventListener("click", () => openMoveClan(p));
   $$("[data-add]", panel).forEach((b) => b.addEventListener("click", () => addRelative(p, b.dataset.add)));
-  bindReorder(panel, children);
 }
 
 function renderUnionPanel(panel, main) {
@@ -1095,7 +1063,6 @@ function renderUnionPanel(panel, main) {
     </div>`;
   $("[data-close]", panel).addEventListener("click", clearSelection);
   $$("[data-goto]", panel).forEach((b) => b.addEventListener("click", () => selectPerson(Number(b.dataset.goto))));
-  bindReorder(panel, children);
   $("[data-act=child]", panel)?.addEventListener("click", () =>
     openPersonForm({ preset: { father_id: m.husband_id, mother_id: m.wife_id, last_name: h.last_name, clan_id: h.clan_id, birth_order: nextChildOrder(m.husband_id) } }),
   );
@@ -1141,7 +1108,7 @@ function openPeopleList() {
     wide: true,
     body: `<input class="input" type="search" placeholder="جست‌وجو در فهرست…" data-q style="margin-bottom:12px">
       <div class="table-wrap"><table class="users people-table">
-        <thead><tr><th>نام</th><th>جنسیت</th><th>تولد</th><th>پدر</th><th>مادر</th><th>همسر</th></tr></thead>
+        <thead><tr><th>نام</th><th>جنسیت</th><th>تولد</th><th>پدر</th><th>مادر</th><th>همسر</th><th>تماس</th></tr></thead>
         <tbody></tbody>
       </table></div>`,
   });
@@ -1159,6 +1126,7 @@ function openPeopleList() {
           <td>${esc(person(p.father_id) ? fullName(person(p.father_id)) : "")}</td>
           <td>${esc(person(p.mother_id) ? fullName(person(p.mother_id)) : "")}</td>
           <td>${esc(S.fam.spousesOf(p.id).map((s) => fullName(person(s.id))).join("، "))}</td>
+          <td dir="ltr">${esc(p.phone || "")}</td>
         </tr>`,
       )
       .join("");
@@ -1253,7 +1221,8 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
         <label class="field"><span>تاریخ تولد</span><input class="input" name="birth_date" placeholder="مثلاً ۱۳۴۵ یا 1966-03-21" value="${esc(p.birth_date)}"></label>
         <label class="field"><span>محل تولد</span><input class="input" name="birth_place" value="${esc(p.birth_place)}"></label>
       </div>
-      <label class="field"><span>فرزند چندم (ترتیب خواهر و برادرها؛ اگر خالی باشد، سال تولد یا ترتیب ثبت ملاک است. در پنل پدر یا مادر با ▲▼ هم می‌شود ترتیب را عوض کرد)</span>
+      <label class="field"><span>شمارهٔ تماس</span><input class="input" type="tel" name="phone" dir="ltr" placeholder="0912…" value="${esc(p.phone)}"></label>
+      <label class="field"><span>فرزند چندم (ترتیب خواهر و برادرها: اول سال تولد مقایسه می‌شود؛ اگر سال تولد نباشد یا یکی باشد، این عدد ملاک است)</span>
         <input class="input" type="number" min="1" max="99" name="birth_order" style="max-width:120px" value="${esc(p.birth_order ?? "")}"></label>
       <label class="check"><input type="checkbox" name="is_deceased" ${p.is_deceased ? "checked" : ""}> درگذشته است</label>
       <label class="field death" ${p.is_deceased ? "" : "hidden"}><span>تاریخ وفات</span><input class="input" name="death_date" value="${esc(p.death_date)}"></label>
@@ -1281,6 +1250,7 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
       gender: lockGender ? p.gender : fd.get("gender"),
       birth_date: fd.get("birth_date"),
       birth_order: fd.get("birth_order") || null,
+      phone: fd.get("phone"),
       birth_place: fd.get("birth_place"),
       is_deceased: form.is_deceased.checked,
       death_date: form.is_deceased.checked ? fd.get("death_date") : "",
@@ -1917,7 +1887,7 @@ async function openAdmin(tab = "users") {
 // history (version control)
 
 const ACTION_FA = { create: "ایجاد", update: "ویرایش", delete: "حذف", restore: "بازیابی" };
-const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id", "birth_order"];
+const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id", "birth_order", "phone"];
 
 const when = (at) => toFa(new Date(`${String(at).replace(" ", "T")}Z`).toLocaleString("fa-IR", { dateStyle: "medium", timeStyle: "short" }));
 
@@ -2058,6 +2028,7 @@ const FIELD_FA = {
   mother_id: "مادر",
   clan_id: "طایفه",
   birth_order: "فرزند چندم",
+  phone: "شمارهٔ تماس",
   husband_id: "شوهر",
   wife_id: "همسر",
   status: "وضعیت",

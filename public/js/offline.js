@@ -57,6 +57,7 @@ const PERSON_DEFAULTS = {
   mother_id: null,
   clan_id: null,
   birth_order: null,
+  phone: "",
 };
 const MARRIAGE_DEFAULTS = { status: "married", marriage_date: "", end_date: "", notes: "" };
 

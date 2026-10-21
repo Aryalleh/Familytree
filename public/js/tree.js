@@ -368,18 +368,23 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
 }
 
 /**
- * Siblings in birth order. Without other information they are ranked by year of birth (then by
- * the order they were entered); a "فرزند چندم" puts someone at exactly that place.
+ * Siblings in birth order: the year of birth decides first; «فرزند چندم» decides when a year is
+ * missing (common for older generations) or the same; otherwise the order they were entered.
  * @param {(item:any)=>number} idOf  person id of an item (items may be ids or wrappers)
  */
 export function sortSiblings(fam, items, idOf = (x) => x) {
-  const p = (it) => fam.get(Math.abs(idOf(it)));
-  const year = (it) => yearOf(p(it)?.birth_date);
-  const byYear = [...items].sort((a, b) => (year(a) && year(b) ? year(a) - year(b) : year(a) ? -1 : year(b) ? 1 : 0) || Math.abs(idOf(a)) - Math.abs(idOf(b)));
-  const rank = new Map(byYear.map((it, i) => [it, i + 1]));
-  const explicit = (it) => p(it)?.birth_order ?? null;
-  const place = (it) => explicit(it) ?? rank.get(it);
-  return [...items].sort((a, b) => place(a) - place(b) || (explicit(b) != null) - (explicit(a) != null) || rank.get(a) - rank.get(b));
+  const info = (it) => {
+    const p = fam.get(Math.abs(idOf(it)));
+    return { year: yearOf(p?.birth_date), order: p?.birth_order ?? null, id: Math.abs(idOf(it)) };
+  };
+  return [...items].sort((a, b) => {
+    const [x, y] = [info(a), info(b)];
+    if (x.year && y.year && x.year !== y.year) return x.year - y.year;
+    if (x.order != null && y.order != null && x.order !== y.order) return x.order - y.order;
+    if (!x.year !== !y.year && (x.order == null || y.order == null)) return x.year ? -1 : 1;
+    if ((x.order != null) !== (y.order != null)) return x.order != null ? -1 : 1;
+    return x.id - y.id;
+  });
 }
 
 /**

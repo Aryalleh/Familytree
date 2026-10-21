@@ -29,6 +29,7 @@ export interface Person {
   mother_id: number | null;
   clan_id: number | null;
   birth_order?: number | null;
+  phone?: string;
   version?: number;
 }
 
