@@ -153,6 +153,49 @@ const DEFAULT_PREFS = { nameGens: 2, orientation: "vertical", hoverTip: true, no
 
 const ORDINAL_FA = ["", "اول", "دوم", "سوم", "چهارم", "پنجم", "ششم", "هفتم", "هشتم", "نهم", "دهم"];
 
+/** Children of a parent, each with ▲▼ to change their order (when the user may edit them). */
+function childRows(children) {
+  const movable = children.length > 1 && children.every((c) => canEditPerson(c));
+  return children
+    .map(
+      (c, i) => `<div class="child-row">${prow(c, person(c).gender === "male" ? "♂ پسر" : "♀ دختر")}${
+        movable
+          ? `<span class="reorder"><button class="btn ghost small" data-move="${i}" data-dir="-1" title="بزرگ‌تر" ${i === 0 ? "disabled" : ""}>▲</button><button class="btn ghost small" data-move="${i}" data-dir="1" title="کوچک‌تر" ${i === children.length - 1 ? "disabled" : ""}>▼</button></span>`
+          : ""
+      }</div>`,
+    )
+    .join("");
+}
+
+/** ▲▼ swap two children and save the whole order as «فرزند چندم» 1..n. */
+function bindReorder(panel, children) {
+  $$("[data-move]", panel).forEach((b) =>
+    b.addEventListener("click", async () => {
+      const i = Number(b.dataset.move);
+      const j = i + Number(b.dataset.dir);
+      const order = [...children];
+      [order[i], order[j]] = [order[j], order[i]];
+      try {
+        for (const [k, id] of order.entries()) {
+          const c = person(id);
+          if (c.birth_order === k + 1) continue;
+          if (!(await saveWithConflicts("PUT", `/api/people/${id}`, { birth_order: k + 1, base_version: c.version }))) return;
+        }
+        await loadTree();
+        if (prefs().siblingOrder !== "birth") toast("ترتیب ذخیره شد. برای دیدنش روی درخت، در تنظیمات «به ترتیب تولد» را انتخاب کنید");
+      } catch (e) {
+        toast(e.message, true);
+      }
+    }),
+  );
+}
+
+/** «فرزند چندم» for a parent's next child: after the ones already there. */
+function nextChildOrder(parentId) {
+  const kids = S.fam.childrenOf(parentId).map(person);
+  return Math.max(kids.length, ...kids.map((c) => c.birth_order || 0)) + 1;
+}
+
 /** "فرزند دوم از ۴ فرزند" among the children of the same parents. */
 function childRank(p) {
   const parent = p.father_id ?? p.mother_id;
@@ -880,7 +923,7 @@ function renderPanel() {
       ${editor ? `<button class="add-row" data-add="spouse">＋ افزودن ${p.gender === "male" ? "همسر" : "شوهر"}</button>` : !spouses.length ? `<div class="muted">ثبت نشده</div>` : ""}
     </div>
     <div class="psec"><h4>فرزندان ${children.length ? `<span class="muted">(${toFa(children.length)} نفر)</span>` : ""}</h4>
-      ${children.map((c) => prow(c, person(c).gender === "male" ? "♂ پسر" : "♀ دختر")).join("")}
+      ${childRows(children)}
       ${editor ? `<div class="add-pair"><button class="add-row" data-add="son">＋ پسر</button><button class="add-row" data-add="daughter">＋ دختر</button></div>` : !children.length ? `<div class="muted">ثبت نشده</div>` : ""}
     </div>
     ${upward && (p.father_id || p.mother_id) ? `<div class="add-pair"><button class="add-row" data-add="brother">＋ برادر</button><button class="add-row" data-add="sister">＋ خواهر</button></div>` : ""}
@@ -1002,6 +1045,7 @@ function renderPanel() {
   $("[data-act=open-clan]", panel)?.addEventListener("click", () => setClan(p.clan_id));
   $("[data-act=move]", panel)?.addEventListener("click", () => openMoveClan(p));
   $$("[data-add]", panel).forEach((b) => b.addEventListener("click", () => addRelative(p, b.dataset.add)));
+  bindReorder(panel, children);
 }
 
 function renderUnionPanel(panel, main) {
@@ -1016,7 +1060,7 @@ function renderUnionPanel(panel, main) {
   const h = person(m.husband_id);
   const w = person(m.wife_id);
   const cons = S.fam.consanguinity(m);
-  const children = S.fam.childrenOf(m.husband_id).filter((c) => person(c).mother_id === m.wife_id);
+  const children = sortSiblings(S.fam, S.fam.childrenOf(m.husband_id).filter((c) => person(c).mother_id === m.wife_id));
   panel.innerHTML = `
     <div class="pcard">
       <div class="pcard-head"><h3>⚭ ازدواج</h3><button class="btn ghost icon-sm" data-close aria-label="بستن">✕</button></div>
@@ -1037,7 +1081,7 @@ function renderUnionPanel(panel, main) {
         </div>`
           : ""
       }
-      ${children.length ? `<div class="psec"><h4>فرزندان <span class="muted">(${toFa(children.length)} نفر)</span></h4>${children.map((c) => prow(c, person(c).gender === "male" ? "♂ پسر" : "♀ دختر")).join("")}</div>` : ""}
+      ${children.length ? `<div class="psec"><h4>فرزندان <span class="muted">(${toFa(children.length)} نفر)</span></h4>${childRows(children)}</div>` : ""}
       ${m.notes ? `<div class="psec"><h4>یادداشت</h4><div class="notes">${esc(m.notes)}</div></div>` : ""}
       ${
         canEditPerson(m.husband_id) || canEditPerson(m.wife_id)
@@ -1051,7 +1095,10 @@ function renderUnionPanel(panel, main) {
     </div>`;
   $("[data-close]", panel).addEventListener("click", clearSelection);
   $$("[data-goto]", panel).forEach((b) => b.addEventListener("click", () => selectPerson(Number(b.dataset.goto))));
-  $("[data-act=child]", panel)?.addEventListener("click", () => openPersonForm({ preset: { father_id: m.husband_id, mother_id: m.wife_id, last_name: h.last_name } }));
+  bindReorder(panel, children);
+  $("[data-act=child]", panel)?.addEventListener("click", () =>
+    openPersonForm({ preset: { father_id: m.husband_id, mother_id: m.wife_id, last_name: h.last_name, clan_id: h.clan_id, birth_order: nextChildOrder(m.husband_id) } }),
+  );
   $("[data-act=edit]", panel)?.addEventListener("click", () => openMarriageForm(m));
   $("[data-act=delete]", panel)?.addEventListener("click", async () => {
     if (!confirm("این ازدواج حذف شود؟ (اشخاص و فرزندان حذف نمی‌شوند)")) return;
@@ -1206,7 +1253,7 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
         <label class="field"><span>تاریخ تولد</span><input class="input" name="birth_date" placeholder="مثلاً ۱۳۴۵ یا 1966-03-21" value="${esc(p.birth_date)}"></label>
         <label class="field"><span>محل تولد</span><input class="input" name="birth_place" value="${esc(p.birth_place)}"></label>
       </div>
-      <label class="field"><span>فرزند چندم (برای ترتیب خواهر و برادرها؛ اگر خالی باشد سال تولد ملاک است)</span>
+      <label class="field"><span>فرزند چندم (ترتیب خواهر و برادرها؛ اگر خالی باشد، سال تولد یا ترتیب ثبت ملاک است. در پنل پدر یا مادر با ▲▼ هم می‌شود ترتیب را عوض کرد)</span>
         <input class="input" type="number" min="1" max="99" name="birth_order" style="max-width:120px" value="${esc(p.birth_order ?? "")}"></label>
       <label class="check"><input type="checkbox" name="is_deceased" ${p.is_deceased ? "checked" : ""}> درگذشته است</label>
       <label class="field death" ${p.is_deceased ? "" : "hidden"}><span>تاریخ وفات</span><input class="input" name="death_date" value="${esc(p.death_date)}"></label>
@@ -1289,7 +1336,8 @@ function addRelative(p, kind) {
     case "daughter": {
       const spouses = S.fam.spousesOf(p.id);
       const other = spouses.find((s) => s.marriage.status !== "divorced")?.id ?? spouses[0]?.id ?? null;
-      const preset = { gender: kind === "son" ? "male" : "female" };
+      // a new child goes to the end of the list of this parent's children
+      const preset = { gender: kind === "son" ? "male" : "female", birth_order: nextChildOrder(p.id) };
       // children take the father's clan
       if (p.gender === "male") Object.assign(preset, { father_id: p.id, mother_id: other, last_name: p.last_name, clan_id: p.clan_id });
       else Object.assign(preset, { mother_id: p.id, father_id: other, last_name: other ? person(other).last_name : "", clan_id: other ? person(other).clan_id : p.clan_id });

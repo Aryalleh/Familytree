@@ -957,6 +957,23 @@ svg.minimap {
 .prow:hover {
   background: var(--surface-2);
 }
+.child-row {
+  display: flex;
+  align-items: center;
+}
+.child-row .prow {
+  flex: 1;
+  min-width: 0;
+}
+.reorder {
+  display: flex;
+  flex-direction: column;
+}
+.reorder .btn {
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
 .prow-name {
   flex: 1;
   min-width: 0;
