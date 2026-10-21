@@ -20,6 +20,8 @@ export const PERSON_FIELDS = [
   "clan_id",
   "birth_order",
   "phone",
+  "sons_count",
+  "daughters_count",
 ] as const;
 export const MARRIAGE_FIELDS = ["husband_id", "wife_id", "status", "marriage_date", "end_date", "notes"] as const;
 

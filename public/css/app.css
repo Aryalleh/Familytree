@@ -1780,3 +1780,28 @@ label.btn.disabled {
     --primary: #1d4ed8;
   }
 }
+
+/* announced children not yet entered */
+.missing-tag rect {
+  fill: var(--surface);
+  stroke: var(--k-inlaw);
+}
+.missing-tag text {
+  fill: var(--k-inlaw);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.missing-box {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--k-inlaw) 45%, transparent);
+  background: color-mix(in srgb, var(--k-inlaw) 10%, var(--surface));
+  border-radius: 10px;
+  font-size: 13px;
+}
+.missing-box b {
+  color: var(--k-inlaw);
+}
+.missing-box .add-pair {
+  margin-top: 8px;
+}

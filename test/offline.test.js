@@ -29,7 +29,8 @@ test("offline edits are queued with temporary ids and applied locally", () => {
 });
 
 test("invalid offline edits are rejected", () => {
-  assert.throws(() => queueEdit([], base, "POST", "/api/people", { first_name: "", gender: "male" }), /نام/);
+  // a person without a name is allowed (filled in later)
+  assert.doesNotThrow(() => queueEdit([], base, "POST", "/api/people", { first_name: "", gender: "male" }));
   assert.throws(() => queueEdit([], base, "POST", "/api/marriages", { husband_id: 2, wife_id: 1 }), /شوهر/);
 });
 

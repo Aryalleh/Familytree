@@ -30,6 +30,8 @@ export interface Person {
   clan_id: number | null;
   birth_order?: number | null;
   phone?: string;
+  sons_count?: number | null;
+  daughters_count?: number | null;
   version?: number;
 }
 

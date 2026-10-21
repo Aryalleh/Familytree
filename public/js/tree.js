@@ -19,6 +19,26 @@ export function yearOf(s) {
   return m ? Number(m[0]) : null;
 }
 
+/** "علی رحیمی"; someone entered without a first name shows as «بی‌نام». */
+export function displayName(p) {
+  if (!p) return "؟";
+  return `${p.first_name || "بی‌نام"} ${p.last_name || ""}`.trim();
+}
+
+/**
+ * Children announced on a person (sons_count / daughters_count) but not yet in the tree.
+ * Counts nobody filled in mean "unknown", so nothing is missing.
+ */
+export function missingChildren(fam, p) {
+  const kids = fam.childrenOf(p.id).map((c) => fam.get(c));
+  const gap = (count, gender) => (count == null ? 0 : Math.max(0, count - kids.filter((k) => k.gender === gender).length));
+  return { sons: gap(p.sons_count, "male"), daughters: gap(p.daughters_count, "female") };
+}
+
+export function missingLabel({ sons, daughters }) {
+  return [sons ? `${toFa(sons)} پسر` : "", daughters ? `${toFa(daughters)} دختر` : ""].filter(Boolean).join(" و ");
+}
+
 export function lifeSpan(p) {
   const b = p.birth_date || "";
   const d = p.death_date || "";
@@ -538,7 +558,7 @@ function rings(parent, x, y, cls) {
 /**
  * Draw a positioned layout into `root` (an SVG <g>).
  * @param {object} L  result of positionModel
- * @param {object} state  {defs, focusId, selectedId, kin, highlight, highlightUnions, relationsTo, noteLines, noteRefs, noteIcon, cont}
+ * @param {object} state  {missingOf, defs, focusId, selectedId, kin, highlight, highlightUnions, relationsTo, noteLines, noteRefs, noteIcon, cont}
  * @param {object} on  event handlers {person(id), union(u), hover(p, evt|null)}
  */
 export function drawLayout(root, L, state = {}, on = {}) {
@@ -639,7 +659,7 @@ export function drawLayout(root, L, state = {}, on = {}) {
     }
     if (p.is_deceased) el("path", { d: "M9,-20 L20,-9 L20,-4 L4,-20 Z", class: "ribbon" }, ag);
 
-    const name = `${p.first_name} ${p.last_name || ""}`.trim();
+    const name = displayName(p);
     const maxW = cw - 12 - 62;
     fitText(text(g, name, { x: cw - 12, y: 27, class: "card-name", "text-anchor": "start", direction: "rtl" }), maxW);
     const span = lifeSpan(p);
@@ -671,6 +691,17 @@ export function drawLayout(root, L, state = {}, on = {}) {
       fitText(t, cw / 2);
       const w = Math.min(cw / 2, (t.getComputedTextLength?.() || label.length * 6) ) + 16;
       tg.insertBefore(el("rect", { x: 0, y: -8, width: w, height: 16, rx: 8 }), t);
+    }
+    const miss = state.missingOf && !copy ? state.missingOf(p) : "";
+    if (miss) {
+      // announced children not yet entered: a small tag on the card's bottom-right
+      const label = `${miss} کم`;
+      const tg = el("g", { class: "missing-tag", transform: `translate(${cw - 6},${ch - 2})` }, g);
+      const t = text(tg, label, { x: -8, y: 0, dy: "0.32em", "text-anchor": "start", direction: "rtl" });
+      const w = (t.getComputedTextLength?.() || label.length * 6) + 16;
+      tg.insertBefore(el("rect", { x: -w, y: -8, width: w, height: 16, rx: 8 }), t);
+      const tip = el("title", {}, tg);
+      tip.textContent = `${miss} هنوز ثبت نشده`;
     }
     const marker = L.markers.get(p.id);
     if (marker) {

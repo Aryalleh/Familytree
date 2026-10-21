@@ -1,6 +1,6 @@
 // Print planning: pick a generation range and split the tree into pages so that every
 // branch (and sub-branch) sits on one page at a readable size.
-import { buildModel, positionModel, drawLayout, svgDefs, el, toFa, cardHeight } from "./tree.js";
+import { buildModel, positionModel, drawLayout, svgDefs, el, toFa, cardHeight, displayName } from "./tree.js";
 
 // Printable area in CSS px (96dpi) after 8mm margins, minus the page header and legend.
 export const PAPERS = {
@@ -203,7 +203,7 @@ function familyName(model, block) {
   return [...block.members]
     .sort((a, b) => blood(a) - blood(b))
     .map((id) => fam.get(Math.abs(id)))
-    .map((p) => `${p.first_name} ${p.last_name || ""}`.trim())
+    .map(displayName)
     .join(" و ");
 }
 
@@ -264,7 +264,7 @@ export function renderPages(root, plan, prep, { title, legendHtml }) {
         const li = document.createElement("li");
         li.value = noteRefs.get(id);
         const b2 = document.createElement("b");
-        b2.textContent = `${p.first_name} ${p.last_name || ""}`.trim() + ": ";
+        b2.textContent = displayName(p) + ": ";
         li.append(b2, p.notes);
         ol?.appendChild(li);
       }

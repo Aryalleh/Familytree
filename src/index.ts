@@ -261,7 +261,7 @@ const updateSettings: Handler = async ({ env, request, user }) => {
 // family tree
 
 const PERSON_COLS =
-  "id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, birth_order, phone, version";
+  "id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, birth_order, phone, sons_count, daughters_count, version";
 const MARRIAGE_COLS = "id, husband_id, wife_id, status, marriage_date, end_date, notes, version";
 
 function isAncestor(people: Map<number, Person>, ancestorId: number, personId: number): boolean {
@@ -285,8 +285,8 @@ function parsePerson(b: Record<string, unknown>, base?: Person): PersonInput {
   const pick = <K extends keyof PersonInput>(k: K): unknown => (b[k] !== undefined ? b[k] : base?.[k]);
   const gender = pick("gender");
   if (gender !== "male" && gender !== "female") throw new HttpError(400, "جنسیت باید مرد یا زن باشد");
+  // a person may be entered without a name (e.g. a child whose name isn't known yet)
   const first = str(pick("first_name"), 100);
-  if (!first) throw new HttpError(400, "نام الزامی است");
   const photo = str(pick("photo_url"), 1000);
   if (photo && !/^https?:\/\//i.test(photo)) throw new HttpError(400, "نشانی عکس باید با http یا https شروع شود");
   const deathDate = str(pick("death_date"), 40);
@@ -306,7 +306,17 @@ function parsePerson(b: Record<string, unknown>, base?: Person): PersonInput {
     clan_id: optId(pick("clan_id")),
     birth_order: optOrder(pick("birth_order")),
     phone: parsePhone(pick("phone")),
+    sons_count: optCount(pick("sons_count")),
+    daughters_count: optCount(pick("daughters_count")),
   };
+}
+
+/** Number of sons / daughters when known: 0–50 or nothing. */
+function optCount(v: unknown): number | null {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(String(v).replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))));
+  if (!Number.isInteger(n) || n < 0 || n > 50) throw new HttpError(400, "تعداد فرزندان باید عددی بین ۰ تا ۵۰ باشد");
+  return n;
 }
 
 /** Phone number: digits (Persian digits allowed), +, spaces, dashes and brackets. */
@@ -509,9 +519,9 @@ const createPerson: Handler = async ({ env, request, user }) => {
   checkParents(people, p);
   const stmts = [
     env.DB.prepare(
-      `INSERT INTO people (first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, birth_order, phone)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${PERSON_COLS}`,
-    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, p.birth_order, p.phone),
+      `INSERT INTO people (first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, birth_order, phone, sons_count, daughters_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${PERSON_COLS}`,
+    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, p.birth_order, p.phone, p.sons_count, p.daughters_count),
     historyStmt(env, "person", "create", me, [], "id = last_insert_rowid()", []),
   ];
   const [res] = await env.DB.batch(stmts);
@@ -561,9 +571,9 @@ const updatePerson: Handler = async ({ env, request, url, user, params }) => {
   const [res] = await env.DB.batch([
     env.DB.prepare(
       `UPDATE people SET first_name = ?, last_name = ?, nickname = ?, gender = ?, birth_date = ?, death_date = ?, is_deceased = ?,
-         birth_place = ?, photo_url = ?, notes = ?, father_id = ?, mother_id = ?, clan_id = ?, birth_order = ?, phone = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+         birth_place = ?, photo_url = ?, notes = ?, father_id = ?, mother_id = ?, clan_id = ?, birth_order = ?, phone = ?, sons_count = ?, daughters_count = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
        WHERE id = ? RETURNING ${PERSON_COLS}`,
-    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, p.birth_order, p.phone, id),
+    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, p.birth_order, p.phone, p.sons_count, p.daughters_count, id),
     historyStmt(env, "person", "update", me, changed, "id = ?", [id]),
   ]);
   return json({ person: res.results[0], merged: changed.length });
@@ -653,9 +663,9 @@ const restorePerson: Handler = async ({ env, user, params }) => {
   const p = parsePerson({ ...d, father_id: (await exists(d.father_id)) ? d.father_id : null, mother_id: (await exists(d.mother_id)) ? d.mother_id : null, clan_id: clan });
   const stmts: D1PreparedStatement[] = [
     env.DB.prepare(
-      `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, birth_order, phone, version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, p.birth_order, p.phone, last.version + 1),
+      `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, birth_order, phone, sons_count, daughters_count, version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, p.birth_order, p.phone, p.sons_count, p.daughters_count, last.version + 1),
     historyStmt(env, "person", "restore", me, [], "id = ?", [id]),
   ];
   // marriages whose last record is a delete involving this person, if the spouse is still here
@@ -1030,9 +1040,9 @@ const importData: Handler = async ({ env, request, user }) => {
   for (const p of people) {
     stmts.push(
       env.DB.prepare(
-        `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, clan_id, birth_order, phone)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(p.id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.clan_id, p.birth_order, p.phone),
+        `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, clan_id, birth_order, phone, sons_count, daughters_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(p.id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.clan_id, p.birth_order, p.phone, p.sons_count, p.daughters_count),
     );
   }
   for (const p of people) {

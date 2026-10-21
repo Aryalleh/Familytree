@@ -35,7 +35,9 @@
    "mother_id": null,
    "clan_id": 1,
    "notes": "بنیان‌گذار خاندان رحیمی؛ صاحب باغ‌های انار در روستای بالا.",
-   "birth_place": "کاشان"
+   "birth_place": "کاشان",
+   "sons_count": 3,
+   "daughters_count": 2
   },
   {
    "id": 2,
@@ -77,7 +79,9 @@
    "mother_id": null,
    "clan_id": 2,
    "notes": "بازرگان پارچه در بازار تبریز.",
-   "birth_place": "تبریز"
+   "birth_place": "تبریز",
+   "sons_count": 3,
+   "daughters_count": 1
   },
   {
    "id": 5,

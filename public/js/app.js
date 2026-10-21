@@ -1,6 +1,6 @@
 import { Family, KIND_LABELS } from "./kinship.js";
 import { DEMO } from "./config.js";
-import { TreeView, lifeSpan, toFa, sortSiblings } from "./tree.js";
+import { TreeView, lifeSpan, toFa, sortSiblings, displayName, missingChildren, missingLabel } from "./tree.js";
 import { prepare, planPages, renderPages, PAPERS } from "./print.js";
 import { generations, clanView } from "./generations.js";
 import { OfflineError, isTemp, local, applyOps, editType, queueEdit, replay, describeOp, CHANGES_FORMAT } from "./offline.js";
@@ -145,10 +145,7 @@ const STATUS_FA = { married: "متأهل", divorced: "جداشده", widowed: "�
 function person(id) {
   return S.fam.get(id);
 }
-function fullName(p) {
-  if (!p) return "؟";
-  return `${p.first_name} ${p.last_name || ""}`.trim();
-}
+const fullName = displayName;
 const DEFAULT_PREFS = { nameGens: 2, orientation: "vertical", hoverTip: true, notesOnTree: false, siblingOrder: "auto" };
 
 const ORDINAL_FA = ["", "اول", "دوم", "سوم", "چهارم", "پنجم", "ششم", "هفتم", "هشتم", "نهم", "دهم"];
@@ -206,7 +203,7 @@ function lineageName(p, gens = prefs().nameGens) {
   for (let i = 0; i < gens; i++) {
     const par = person(cur.father_id) || person(cur.mother_id);
     if (!par) break;
-    parts.push(par.first_name);
+    parts.push(par.first_name || "بی‌نام");
     cur = par;
   }
   return parts.join(" فرزند ");
@@ -708,7 +705,7 @@ function redraw(relayout = false) {
 
   const kin = new Set(S.selectedId != null && person(S.selectedId) ? familyIds(S.selectedId).slice(1) : []);
   const pr = prefs();
-  const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0, guests: S.guests };
+  const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0, guests: S.guests, missingOf: (p) => missingLabel(missingChildren(S.fam, p)) };
   S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation, gens: S.gens, siblingOrder: pr.siblingOrder });
   renderLegend();
 }
@@ -894,6 +891,7 @@ function renderPanel() {
     </div>
     <div class="psec"><h4>فرزندان ${children.length ? `<span class="muted">(${toFa(children.length)} نفر)</span>` : ""}</h4>
       ${childRows(children)}
+      ${missingBox(p, editor)}
       ${editor ? `<div class="add-pair"><button class="add-row" data-add="son">＋ پسر</button><button class="add-row" data-add="daughter">＋ دختر</button></div>` : !children.length ? `<div class="muted">ثبت نشده</div>` : ""}
     </div>
     ${upward && (p.father_id || p.mother_id) ? `<div class="add-pair"><button class="add-row" data-add="brother">＋ برادر</button><button class="add-row" data-add="sister">＋ خواهر</button></div>` : ""}
@@ -901,11 +899,12 @@ function renderPanel() {
 
   const infoTab = `
     <dl class="facts">
-      <dt>نام</dt><dd>${esc(p.first_name)}</dd>
+      <dt>نام</dt><dd>${p.first_name ? esc(p.first_name) : `<span class="muted">بی‌نام</span>`}</dd>
       ${p.last_name ? `<dt>نام خانوادگی</dt><dd>${esc(p.last_name)}</dd>` : ""}
       ${p.nickname ? `<dt>لقب</dt><dd>${esc(p.nickname)}</dd>` : ""}
       <dt>جنسیت</dt><dd>${p.gender === "male" ? "مرد" : "زن"}</dd>
       ${childRank(p)}
+      ${p.sons_count != null || p.daughters_count != null ? `<dt>تعداد فرزندان</dt><dd>${[p.sons_count != null ? `${toFa(p.sons_count)} پسر` : "", p.daughters_count != null ? `${toFa(p.daughters_count)} دختر` : ""].filter(Boolean).join(" و ")}</dd>` : ""}
       ${p.birth_date ? `<dt>تولد</dt><dd>${esc(toFa(p.birth_date))}</dd>` : ""}
       ${p.birth_place ? `<dt>محل تولد</dt><dd>${esc(p.birth_place)}</dd>` : ""}
       ${p.phone ? `<dt>شمارهٔ تماس</dt><dd><a href="tel:${esc(p.phone.replace(/[^\d+]/g, ""))}" dir="ltr">${esc(p.phone)}</a></dd>` : ""}
@@ -933,6 +932,7 @@ function renderPanel() {
         <div class="phero-photo ${p.gender}">${p.photo_url ? `<img src="${esc(p.photo_url)}" alt="">` : `<span class="sil"></span>`}${p.is_deceased ? `<i class="ribbon-c"></i>` : ""}</div>
         <div>
           <h2>${esc(fullName(p))}</h2>
+          ${!p.first_name && editor ? `<button class="btn small primary" data-act="name">✎ افزودن نام</button>` : ""}
           ${span ? `<div class="phero-span">(${esc(span)})</div>` : ""}
           <div class="muted small">P-${toFa(String(p.id).padStart(4, "0"))}</div>
           <span class="gpill ${p.gender}">${p.gender === "male" ? "مرد" : "زن"}</span>
@@ -1016,6 +1016,88 @@ function renderPanel() {
   $("[data-act=open-clan]", panel)?.addEventListener("click", () => setClan(p.clan_id));
   $("[data-act=move]", panel)?.addEventListener("click", () => openMoveClan(p));
   $$("[data-add]", panel).forEach((b) => b.addEventListener("click", () => addRelative(p, b.dataset.add)));
+  $$("[data-unnamed]", panel).forEach((b) => b.addEventListener("click", () => addUnnamedChild(p, b.dataset.unnamed, b)));
+  $("[data-act=name]", panel)?.addEventListener("click", () => openNameForm(p));
+}
+
+/** "⚠ ۱ پسر و ۲ دختر هنوز ثبت نشده" under the children, with buttons to add them without a name. */
+function missingBox(p, editor) {
+  const miss = missingChildren(S.fam, p);
+  if (!miss.sons && !miss.daughters) return "";
+  return `<div class="missing-box">
+    <div>⚠ طبق تعداد ثبت‌شده، <b>${missingLabel(miss)}</b> هنوز در شجره‌نامه نیست.</div>
+    ${
+      editor
+        ? `<div class="add-pair">
+        ${miss.sons ? `<button class="btn small" data-unnamed="son">＋ پسر بی‌نام</button>` : ""}
+        ${miss.daughters ? `<button class="btn small" data-unnamed="daughter">＋ دختر بی‌نام</button>` : ""}
+      </div>`
+        : ""
+    }
+  </div>`;
+}
+
+/** Parents, surname and clan for a new son or daughter of p. */
+function childPreset(p, kind) {
+  const spouses = S.fam.spousesOf(p.id);
+  const other = spouses.find((s) => s.marriage.status !== "divorced")?.id ?? spouses[0]?.id ?? null;
+  // a new child goes to the end of the list of this parent's children
+  const preset = { gender: kind === "son" ? "male" : "female", birth_order: nextChildOrder(p.id) };
+  // children take the father's clan
+  if (p.gender === "male") Object.assign(preset, { father_id: p.id, mother_id: other, last_name: p.last_name, clan_id: p.clan_id });
+  else Object.assign(preset, { mother_id: p.id, father_id: other, last_name: other ? person(other).last_name : "", clan_id: other ? person(other).clan_id : p.clan_id });
+  return preset;
+}
+
+/** Add a child with no name yet, to be named later from its card. */
+async function addUnnamedChild(p, kind, btn) {
+  btn.disabled = true;
+  try {
+    await api("POST", "/api/people", { ...childPreset(p, kind), first_name: "" });
+    toast(`${kind === "son" ? "پسر" : "دختر"} بی‌نام افزوده شد؛ هر وقت نامش را دانستید، روی کارتش «افزودن نام» را بزنید`);
+    await loadTree();
+  } catch (e) {
+    toast(e.message, true);
+    btn.disabled = false;
+  }
+}
+
+/** Quick form to give a name to someone entered without one. */
+function openNameForm(p) {
+  const { el, close } = modal({
+    title: "افزودن نام",
+    body: `<form id="nf" novalidate>
+      <p class="muted">${esc(lineageName(p))}</p>
+      <div class="row">
+        <label class="field"><span>نام</span><input class="input" name="first_name"></label>
+        <label class="field"><span>نام خانوادگی</span><input class="input" name="last_name" value="${esc(p.last_name)}"></label>
+      </div>
+      <div class="error"></div>
+    </form>`,
+    foot: `<button class="btn" data-cancel>انصراف</button><button class="btn primary" data-save>ذخیره</button>`,
+  });
+  const form = $("#nf", el);
+  form.first_name.focus();
+  $("[data-cancel]", el).addEventListener("click", close);
+  const save = async () => {
+    const first = form.first_name.value.trim();
+    if (!first) return ($(".error", form).textContent = "نام را بنویسید");
+    const send = { first_name: first, base_version: p.version };
+    if (form.last_name.value.trim() !== (p.last_name || "")) send.last_name = form.last_name.value.trim();
+    try {
+      if (!(await saveWithConflicts("PUT", `/api/people/${p.id}`, send))) return;
+      close();
+      toast("نام ثبت شد");
+      await loadTree();
+    } catch (e) {
+      $(".error", form).textContent = e.message;
+    }
+  };
+  $("[data-save]", el).addEventListener("click", save);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    save();
+  });
 }
 
 function renderUnionPanel(panel, main) {
@@ -1207,7 +1289,7 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
     title: title || (isEdit ? `ویرایش ${esc(fullName(existing))}` : "افزودن شخص"),
     body: `<form id="pf" novalidate>
       <div class="row">
-        <label class="field"><span>نام *</span><input class="input" name="first_name" required value="${esc(p.first_name)}"></label>
+        <label class="field"><span>نام</span><input class="input" name="first_name" placeholder="اگر نمی‌دانید خالی بگذارید" value="${esc(p.first_name)}"></label>
         <label class="field"><span>نام خانوادگی</span><input class="input" name="last_name" value="${esc(p.last_name)}"></label>
       </div>
       <div class="row">
@@ -1226,6 +1308,11 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
       <label class="field"><span>شمارهٔ تماس</span><input class="input" type="tel" name="phone" dir="ltr" placeholder="0912…" value="${esc(p.phone)}"></label>
       <label class="field"><span>فرزند چندم (ترتیب خواهر و برادرها: اول سال تولد مقایسه می‌شود؛ اگر سال تولد نباشد یا یکی باشد، این عدد ملاک است)</span>
         <input class="input" type="number" min="1" max="99" name="birth_order" style="max-width:120px" value="${esc(p.birth_order ?? "")}"></label>
+      <div class="row">
+        <label class="field"><span>تعداد پسران</span><input class="input" type="number" min="0" max="50" name="sons_count" placeholder="نامعلوم" value="${esc(p.sons_count ?? "")}"></label>
+        <label class="field"><span>تعداد دختران</span><input class="input" type="number" min="0" max="50" name="daughters_count" placeholder="نامعلوم" value="${esc(p.daughters_count ?? "")}"></label>
+      </div>
+      <p class="hint">اگر تعداد فرزندان را بدانید ولی همه ثبت نشده باشند، شجره‌نامه نشان می‌دهد چند پسر یا دختر کم است.</p>
       <label class="check"><input type="checkbox" name="is_deceased" ${p.is_deceased ? "checked" : ""}> درگذشته است</label>
       <label class="field death" ${p.is_deceased ? "" : "hidden"}><span>تاریخ وفات</span><input class="input" name="death_date" value="${esc(p.death_date)}"></label>
       <div class="row">
@@ -1252,6 +1339,8 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
       gender: lockGender ? p.gender : fd.get("gender"),
       birth_date: fd.get("birth_date"),
       birth_order: fd.get("birth_order") || null,
+      sons_count: fd.get("sons_count") === "" ? null : fd.get("sons_count"),
+      daughters_count: fd.get("daughters_count") === "" ? null : fd.get("daughters_count"),
       phone: fd.get("phone"),
       birth_place: fd.get("birth_place"),
       is_deceased: form.is_deceased.checked,
@@ -1305,16 +1394,8 @@ function addRelative(p, kind) {
     case "mother":
       return openParentForm(p, kind === "father");
     case "son":
-    case "daughter": {
-      const spouses = S.fam.spousesOf(p.id);
-      const other = spouses.find((s) => s.marriage.status !== "divorced")?.id ?? spouses[0]?.id ?? null;
-      // a new child goes to the end of the list of this parent's children
-      const preset = { gender: kind === "son" ? "male" : "female", birth_order: nextChildOrder(p.id) };
-      // children take the father's clan
-      if (p.gender === "male") Object.assign(preset, { father_id: p.id, mother_id: other, last_name: p.last_name, clan_id: p.clan_id });
-      else Object.assign(preset, { mother_id: p.id, father_id: other, last_name: other ? person(other).last_name : "", clan_id: other ? person(other).clan_id : p.clan_id });
-      return openPersonForm({ title: `افزودن ${kind === "son" ? "پسر" : "دختر"} برای ${esc(name)}`, preset });
-    }
+    case "daughter":
+      return openPersonForm({ title: `افزودن ${kind === "son" ? "پسر" : "دختر"} برای ${esc(name)}`, preset: childPreset(p, kind) });
     case "brother":
     case "sister":
       return openPersonForm({
@@ -1889,7 +1970,7 @@ async function openAdmin(tab = "users") {
 // history (version control)
 
 const ACTION_FA = { create: "ایجاد", update: "ویرایش", delete: "حذف", restore: "بازیابی" };
-const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id", "birth_order", "phone"];
+const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id", "birth_order", "phone", "sons_count", "daughters_count"];
 
 const when = (at) => toFa(new Date(`${String(at).replace(" ", "T")}Z`).toLocaleString("fa-IR", { dateStyle: "medium", timeStyle: "short" }));
 
@@ -1956,7 +2037,7 @@ async function openRecentChanges() {
     return toast(e instanceof OfflineError ? "فهرست تغییرات فقط به‌صورت آنلاین در دسترس است." : e.message, true);
   }
   const name = (h) => {
-    if (h.entity === "person") return `${h.data.first_name} ${h.data.last_name || ""}`.trim();
+    if (h.entity === "person") return fullName(h.data);
     return `ازدواج ${showValue("husband_id", h.data.husband_id)} و ${showValue("wife_id", h.data.wife_id)}`;
   };
   const { el, close } = modal({
@@ -2004,8 +2085,7 @@ const REPO_URL = "https://github.com/Aryalleh/Familytree";
 
 /**
  * A card at the side of the demo with Cloudflare's "Deploy to Cloudflare" button: it copies the
- * project to the visitor's own account, creates the database and deploys it — the visitor signs
- * in to Cloudflare themselves, so nobody has to hand over an API token.
+ * project to the visitor's own account, creates the database and deploys it.
  */
 function setupDeployCard() {
   const card = document.createElement("aside");
@@ -2014,15 +2094,9 @@ function setupDeployCard() {
   card.innerHTML = `
     <button class="btn ghost small close" data-close aria-label="بستن">✕</button>
     <h3>🌳 شجره‌نامهٔ خانوادهٔ خودتان را بسازید</h3>
-    <p>رایگان، روی حساب Cloudflare خودتان؛ داده‌ها فقط در اختیار شماست.</p>
-    <ol>
-      <li>یک حساب رایگان <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">Cloudflare</a> و یک حساب <a href="https://github.com/signup" target="_blank" rel="noopener">GitHub</a> داشته باشید.</li>
-      <li>دکمهٔ زیر را بزنید و وارد حساب Cloudflare خودتان شوید. برنامه و دیتابیس خودکار ساخته می‌شوند.</li>
-      <li>آدرسی را که در پایان داده می‌شود باز کنید و ثبت‌نام کنید؛ نخستین نفر مدیر شجره‌نامه می‌شود.</li>
-    </ol>
+    <p>رایگان، روی حساب Cloudflare خودتان. دکمه را بزنید تا برنامه و دیتابیس برایتان ساخته شود؛ نخستین کسی که ثبت‌نام کند مدیر است.</p>
     <a class="deploy-btn" href="https://deploy.workers.cloudflare.com/?url=${REPO_URL}" target="_blank" rel="noopener">
-      <span class="cf-cloud">☁</span> Deploy to Cloudflare</a>
-    <p class="hint">نیازی نیست توکن یا رمزی به ما بدهید؛ ورود مستقیم در خود سایت Cloudflare انجام می‌شود. <a href="${REPO_URL}#readme" target="_blank" rel="noopener">راهنمای کامل</a></p>`;
+      <span class="cf-cloud">☁</span> Deploy to Cloudflare</a>`;
   const pill = document.createElement("button");
   pill.className = "btn primary deploy-pill";
   pill.textContent = "🌳 ساخت شجره‌نامهٔ خودم";
@@ -2076,6 +2150,8 @@ const FIELD_FA = {
   clan_id: "طایفه",
   birth_order: "فرزند چندم",
   phone: "شمارهٔ تماس",
+  sons_count: "تعداد پسران",
+  daughters_count: "تعداد دختران",
   husband_id: "شوهر",
   wife_id: "همسر",
   status: "وضعیت",
