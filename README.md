@@ -52,6 +52,8 @@ A Persian (RTL) family-tree maker that runs entirely on **Cloudflare Workers + D
 
 ## Setup / راه‌اندازی
 
+Requires **Node.js 22 or newer** (Wrangler needs it). With [nvm](https://github.com/nvm-sh/nvm): `nvm install && nvm use` (reads `.nvmrc`).
+
 ```bash
 npm install
 npx wrangler d1 create familytree        # copy the printed database_id into wrangler.toml
