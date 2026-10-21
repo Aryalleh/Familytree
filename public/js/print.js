@@ -28,15 +28,15 @@ export const SIZES = { small: 0.42, medium: 0.58, large: 0.78 };
 /**
  * @param {{orientation:string, notes:'card'|'list'|'none'}} opts
  */
-export function prepare(fam, { orientation, notes, gens = null }) {
+export function prepare(fam, { orientation, notes, gens = null, siblingOrder = "auto" }) {
   const model = buildModel(fam, fam, { duplicates: true, gens });
   const hasNotes = [...fam.people.values()].some((p) => p.notes);
   const noteLines = notes === "card" && hasNotes ? CARD_NOTE_LINES : 0;
   const cardH = cardHeight(noteLines);
-  const full = positionModel(model, { orientation, cardH });
+  const full = positionModel(model, { orientation, cardH, siblingOrder });
   if (!gens) full.rows.forEach((r, i) => r.blocks.forEach((b) => model.genOf.set(b.key, i + 1)));
   const generations = Math.max(1, ...model.genOf.values());
-  return { model, full, orientation, cardH, noteLines, notes: hasNotes ? notes : "none", generations };
+  return { model, full, orientation, cardH, siblingOrder, noteLines, notes: hasNotes ? notes : "none", generations };
 }
 
 /**
@@ -44,7 +44,7 @@ export function prepare(fam, { orientation, notes, gens = null }) {
  * @param {{from:number, to:number, paper:string, mode:'one'|'auto'|'count', size?:string, pages?:number}} opts
  */
 export function planPages(prep, opts) {
-  const { model, full, orientation, cardH } = prep;
+  const { model, full, orientation, cardH, siblingOrder } = prep;
   const paper = PAPERS[opts.paper] || PAPERS.a4l;
   // the note list takes a side column on landscape paper and a band at the bottom on portrait
   const notesBeside = paper.w > paper.h;
@@ -67,7 +67,7 @@ export function planPages(prep, opts) {
   const cache = new Map();
   const layoutOf = (blocks) => {
     const keys = blocks.map((b) => b.key).sort().join(",");
-    if (!cache.has(keys)) cache.set(keys, positionModel(model, { keys: new Set(blocks.map((b) => b.key)), orientation, cardH }));
+    if (!cache.has(keys)) cache.set(keys, positionModel(model, { keys: new Set(blocks.map((b) => b.key)), orientation, cardH, siblingOrder }));
     return cache.get(keys);
   };
   const scaleOf = (blocks) => {

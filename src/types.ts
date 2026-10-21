@@ -28,6 +28,7 @@ export interface Person {
   father_id: number | null;
   mother_id: number | null;
   clan_id: number | null;
+  birth_order?: number | null;
   version?: number;
 }
 

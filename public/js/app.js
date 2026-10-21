@@ -1,6 +1,6 @@
 import { Family, KIND_LABELS } from "./kinship.js";
 import { DEMO } from "./config.js";
-import { TreeView, lifeSpan, toFa } from "./tree.js";
+import { TreeView, lifeSpan, toFa, sortSiblings } from "./tree.js";
 import { prepare, planPages, renderPages, PAPERS } from "./print.js";
 import { generations, clanView } from "./generations.js";
 import { OfflineError, isTemp, local, applyOps, editType, queueEdit, replay, describeOp, CHANGES_FORMAT } from "./offline.js";
@@ -149,7 +149,22 @@ function fullName(p) {
   if (!p) return "؟";
   return `${p.first_name} ${p.last_name || ""}`.trim();
 }
-const DEFAULT_PREFS = { nameGens: 2, orientation: "vertical", hoverTip: true, notesOnTree: false };
+const DEFAULT_PREFS = { nameGens: 2, orientation: "vertical", hoverTip: true, notesOnTree: false, siblingOrder: "auto" };
+
+const ORDINAL_FA = ["", "اول", "دوم", "سوم", "چهارم", "پنجم", "ششم", "هفتم", "هشتم", "نهم", "دهم"];
+
+/** "فرزند دوم از ۴ فرزند" among the children of the same parents. */
+function childRank(p) {
+  const parent = p.father_id ?? p.mother_id;
+  if (!person(parent)) return "";
+  const sibs = S.fam.childrenOf(parent).filter((c) => {
+    const x = person(c);
+    return (!p.father_id || x.father_id === p.father_id) && (!p.mother_id || x.mother_id === p.mother_id);
+  });
+  if (sibs.length < 2) return "";
+  const n = sortSiblings(S.fam, sibs).indexOf(p.id) + 1;
+  return `<dt>فرزند</dt><dd>${ORDINAL_FA[n] || `${toFa(n)}م`} از ${toFa(sibs.length)} فرزند</dd>`;
+}
 
 function prefs() {
   let saved = {};
@@ -681,7 +696,7 @@ function redraw(relayout = false) {
   const kin = new Set(S.selectedId != null && person(S.selectedId) ? familyIds(S.selectedId).slice(1) : []);
   const pr = prefs();
   const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0, guests: S.guests };
-  S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation, gens: S.gens });
+  S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation, gens: S.gens, siblingOrder: pr.siblingOrder });
   renderLegend();
 }
 
@@ -840,7 +855,7 @@ function renderPanel() {
   const rels = focus && focus.id !== p.id ? relationsTo(p.id) : [];
   const groups = S.fam.relativeGroups(p.id).filter((g) => !["پدر", "مادر", "همسر", "شوهر", "پسران", "دختران"].includes(g.title));
   const spouses = S.fam.spousesOf(p.id);
-  const children = S.fam.childrenOf(p.id);
+  const children = sortSiblings(S.fam, S.fam.childrenOf(p.id));
   const editor = canEditPerson(p.id);
   // parents are added as new people of this clan (or chosen from existing ones)
   const upward = editor;
@@ -877,6 +892,7 @@ function renderPanel() {
       ${p.last_name ? `<dt>نام خانوادگی</dt><dd>${esc(p.last_name)}</dd>` : ""}
       ${p.nickname ? `<dt>لقب</dt><dd>${esc(p.nickname)}</dd>` : ""}
       <dt>جنسیت</dt><dd>${p.gender === "male" ? "مرد" : "زن"}</dd>
+      ${childRank(p)}
       ${p.birth_date ? `<dt>تولد</dt><dd>${esc(toFa(p.birth_date))}</dd>` : ""}
       ${p.birth_place ? `<dt>محل تولد</dt><dd>${esc(p.birth_place)}</dd>` : ""}
       ${p.is_deceased ? `<dt>وفات</dt><dd>${esc(toFa(p.death_date) || "درگذشته")}</dd>` : ""}
@@ -1190,6 +1206,8 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
         <label class="field"><span>تاریخ تولد</span><input class="input" name="birth_date" placeholder="مثلاً ۱۳۴۵ یا 1966-03-21" value="${esc(p.birth_date)}"></label>
         <label class="field"><span>محل تولد</span><input class="input" name="birth_place" value="${esc(p.birth_place)}"></label>
       </div>
+      <label class="field"><span>فرزند چندم (برای ترتیب خواهر و برادرها؛ اگر خالی باشد سال تولد ملاک است)</span>
+        <input class="input" type="number" min="1" max="99" name="birth_order" style="max-width:120px" value="${esc(p.birth_order ?? "")}"></label>
       <label class="check"><input type="checkbox" name="is_deceased" ${p.is_deceased ? "checked" : ""}> درگذشته است</label>
       <label class="field death" ${p.is_deceased ? "" : "hidden"}><span>تاریخ وفات</span><input class="input" name="death_date" value="${esc(p.death_date)}"></label>
       <div class="row">
@@ -1215,6 +1233,7 @@ function openPersonForm({ person: existing, preset = {}, lockGender = false, tit
       nickname: fd.get("nickname"),
       gender: lockGender ? p.gender : fd.get("gender"),
       birth_date: fd.get("birth_date"),
+      birth_order: fd.get("birth_order") || null,
       birth_place: fd.get("birth_place"),
       is_deceased: form.is_deceased.checked,
       death_date: form.is_deceased.checked ? fd.get("death_date") : "",
@@ -1850,7 +1869,7 @@ async function openAdmin(tab = "users") {
 // history (version control)
 
 const ACTION_FA = { create: "ایجاد", update: "ویرایش", delete: "حذف", restore: "بازیابی" };
-const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id"];
+const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id", "birth_order"];
 
 const when = (at) => toFa(new Date(`${String(at).replace(" ", "T")}Z`).toLocaleString("fa-IR", { dateStyle: "medium", timeStyle: "short" }));
 
@@ -1990,6 +2009,7 @@ const FIELD_FA = {
   father_id: "پدر",
   mother_id: "مادر",
   clan_id: "طایفه",
+  birth_order: "فرزند چندم",
   husband_id: "شوهر",
   wife_id: "همسر",
   status: "وضعیت",
@@ -2312,6 +2332,10 @@ function openSettings() {
         <label class="check"><input type="radio" name="orientation" value="horizontal" ${pr.orientation === "horizontal" ? "checked" : ""}> افقی: نسل‌ها از راست به چپ، فرزندان زیر هم (برای خانواده‌های پرجمعیت، کم‌عرض‌تر)</label>
       </div>
       <label class="check"><input type="checkbox" name="hoverTip" ${pr.hoverTip ? "checked" : ""}> نمایش اطلاعات و یادداشت با نگه داشتن موس روی هر نفر</label>
+      <div class="field"><span>چیدمان خواهر و برادرها</span>
+        <label class="check"><input type="radio" name="siblingOrder" value="auto" ${pr.siblingOrder !== "birth" ? "checked" : ""}> خودکار (کمترین خط‌های متقاطع)</label>
+        <label class="check"><input type="radio" name="siblingOrder" value="birth" ${pr.siblingOrder === "birth" ? "checked" : ""}> به ترتیب تولد (بزرگ‌تر سمت راست، یا بالا در چیدمان افقی)</label>
+      </div>
       <label class="check"><input type="checkbox" name="notesOnTree" ${pr.notesOnTree ? "checked" : ""}> نمایش یادداشت روی کارت‌های شجره‌نامه (برای چاپ، شیوهٔ نمایش یادداشت در پنجرهٔ چاپ انتخاب می‌شود)</label>
       <p class="hint">این تنظیمات برای حساب شما ذخیره می‌شود و روی همهٔ دستگاه‌هایتان اعمال می‌شود.</p>
       <div class="error"></div>
@@ -2333,6 +2357,7 @@ function openSettings() {
         orientation: form.orientation.value,
         hoverTip: form.hoverTip.checked,
         notesOnTree: form.notesOnTree.checked,
+        siblingOrder: form.siblingOrder.value,
       });
       close();
       updateModeLabel();
@@ -2360,8 +2385,9 @@ let printPrep = null;
 function buildPrint(opts) {
   const orientation = opts.orientation || prefs().orientation;
   const notes = opts.notes || "list";
-  if (!printPrep || printPrep.fam !== S.viewFam || printPrep.orientation !== orientation || printPrep.notesMode !== notes) {
-    printPrep = { ...prepare(S.viewFam, { orientation, notes, gens: S.gens }), fam: S.viewFam, notesMode: notes };
+  const siblingOrder = prefs().siblingOrder;
+  if (!printPrep || printPrep.fam !== S.viewFam || printPrep.orientation !== orientation || printPrep.notesMode !== notes || printPrep.siblingOrder !== siblingOrder) {
+    printPrep = { ...prepare(S.viewFam, { orientation, notes, gens: S.gens, siblingOrder }), fam: S.viewFam, notesMode: notes };
   }
   const plan = planPages(printPrep, { ...opts, to: Math.min(opts.to, printPrep.generations) });
   renderPages($("#print-root"), plan, printPrep, { title: "شجره‌نامه خاندان", legendHtml: PRINT_LEGEND });

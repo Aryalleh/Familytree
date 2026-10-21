@@ -5,7 +5,7 @@
 // bump the suffix when demo/data.json changes, so returning visitors get the new sample
 const KEY = "ft_demo_db_2";
 const USER = { id: 1, username: "demo", display_name: "کاربر نمایشی", role: "admin", prefs: "{}" };
-const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id"];
+const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id", "birth_order"];
 const MARRIAGE_FIELDS = ["husband_id", "wife_id", "status", "marriage_date", "end_date", "notes"];
 
 let db;
@@ -40,7 +40,7 @@ async function load(reset = false) {
 }
 
 function pick(o, fields) {
-  return Object.fromEntries(fields.map((f) => [f, o[f] ?? (f.endsWith("_id") ? null : f === "is_deceased" ? 0 : "")]));
+  return Object.fromEntries(fields.map((f) => [f, o[f] ?? (f.endsWith("_id") || f === "birth_order" ? null : f === "is_deceased" ? 0 : "")]));
 }
 
 function log(entity, rec, action, changed, who = USER.display_name) {
@@ -69,7 +69,7 @@ const num = (v) => (v === "" || v == null ? null : Number(v));
 function cleanPerson(b, base = {}) {
   const p = { ...base };
   for (const f of PERSON_FIELDS) if (b[f] !== undefined) p[f] = b[f];
-  for (const f of ["father_id", "mother_id", "clan_id"]) p[f] = num(p[f]);
+  for (const f of ["father_id", "mother_id", "clan_id", "birth_order"]) p[f] = num(p[f]);
   p.is_deceased = p.is_deceased || p.death_date ? 1 : 0;
   for (const f of PERSON_FIELDS) if (typeof p[f] === "string") p[f] = p[f].trim();
   if (!p.first_name) throw new Fail(400, "نام الزامی است");

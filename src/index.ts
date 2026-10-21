@@ -261,7 +261,7 @@ const updateSettings: Handler = async ({ env, request, user }) => {
 // family tree
 
 const PERSON_COLS =
-  "id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, version";
+  "id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, birth_order, version";
 const MARRIAGE_COLS = "id, husband_id, wife_id, status, marriage_date, end_date, notes, version";
 
 function isAncestor(people: Map<number, Person>, ancestorId: number, personId: number): boolean {
@@ -304,7 +304,16 @@ function parsePerson(b: Record<string, unknown>, base?: Person): PersonInput {
     father_id: optId(pick("father_id")),
     mother_id: optId(pick("mother_id")),
     clan_id: optId(pick("clan_id")),
+    birth_order: optOrder(pick("birth_order")),
   };
+}
+
+/** "فرزند چندم": a positive whole number or nothing. */
+function optOrder(v: unknown): number | null {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(String(v).replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))));
+  if (!Number.isInteger(n) || n < 1 || n > 99) throw new HttpError(400, "«فرزند چندم» باید عددی بین ۱ تا ۹۹ باشد");
+  return n;
 }
 
 function checkParents(people: Map<number, Person>, p: PersonInput, selfId?: number) {
@@ -492,9 +501,9 @@ const createPerson: Handler = async ({ env, request, user }) => {
   checkParents(people, p);
   const stmts = [
     env.DB.prepare(
-      `INSERT INTO people (first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${PERSON_COLS}`,
-    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id),
+      `INSERT INTO people (first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, birth_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${PERSON_COLS}`,
+    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, p.birth_order),
     historyStmt(env, "person", "create", me, [], "id = last_insert_rowid()", []),
   ];
   const [res] = await env.DB.batch(stmts);
@@ -544,9 +553,9 @@ const updatePerson: Handler = async ({ env, request, url, user, params }) => {
   const [res] = await env.DB.batch([
     env.DB.prepare(
       `UPDATE people SET first_name = ?, last_name = ?, nickname = ?, gender = ?, birth_date = ?, death_date = ?, is_deceased = ?,
-         birth_place = ?, photo_url = ?, notes = ?, father_id = ?, mother_id = ?, clan_id = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+         birth_place = ?, photo_url = ?, notes = ?, father_id = ?, mother_id = ?, clan_id = ?, birth_order = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
        WHERE id = ? RETURNING ${PERSON_COLS}`,
-    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, id),
+    ).bind(p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, p.birth_order, id),
     historyStmt(env, "person", "update", me, changed, "id = ?", [id]),
   ]);
   return json({ person: res.results[0], merged: changed.length });
@@ -636,9 +645,9 @@ const restorePerson: Handler = async ({ env, user, params }) => {
   const p = parsePerson({ ...d, father_id: (await exists(d.father_id)) ? d.father_id : null, mother_id: (await exists(d.mother_id)) ? d.mother_id : null, clan_id: clan });
   const stmts: D1PreparedStatement[] = [
     env.DB.prepare(
-      `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, last.version + 1),
+      `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, father_id, mother_id, clan_id, birth_order, version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.father_id, p.mother_id, p.clan_id, p.birth_order, last.version + 1),
     historyStmt(env, "person", "restore", me, [], "id = ?", [id]),
   ];
   // marriages whose last record is a delete involving this person, if the spouse is still here
@@ -1013,9 +1022,9 @@ const importData: Handler = async ({ env, request, user }) => {
   for (const p of people) {
     stmts.push(
       env.DB.prepare(
-        `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, clan_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(p.id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.clan_id),
+        `INSERT INTO people (id, first_name, last_name, nickname, gender, birth_date, death_date, is_deceased, birth_place, photo_url, notes, clan_id, birth_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(p.id, p.first_name, p.last_name, p.nickname, p.gender, p.birth_date, p.death_date, p.is_deceased, p.birth_place, p.photo_url, p.notes, p.clan_id, p.birth_order),
     );
   }
   for (const p of people) {

@@ -164,9 +164,11 @@ export function buildModel(fam, full = fam, { duplicates = false, gens = null } 
  * Works in an abstract frame — u: across a generation, v: down the generations — and maps it
  * to the screen: vertical → (u, v); horizontal → (−v, u), i.e. generations run right-to-left
  * and children are stacked under each other, which keeps wide families narrow.
- * @param {{keys?:Set<string>|null, orientation?:'vertical'|'horizontal', cardH?:number}} opts
+ * siblingOrder "birth" lays the blocks out as a tree with siblings in birth order (see
+ * birthLayout) instead of letting dagre order them to minimise crossings.
+ * @param {{keys?:Set<string>|null, orientation?:'vertical'|'horizontal', cardH?:number, siblingOrder?:'auto'|'birth'}} opts
  */
-export function positionModel(model, { keys = null, orientation = "vertical", cardH = CARD_H } = {}) {
+export function positionModel(model, { keys = null, orientation = "vertical", cardH = CARD_H, siblingOrder = "auto" } = {}) {
   const vertical = orientation !== "horizontal";
   const cw = CARD_W;
   const ch = cardH;
@@ -181,25 +183,36 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
   const { blockOf } = model;
   const size = (b) => b.members.length * cC + (b.members.length - 1) * GAP;
 
-  const g = new dagre.graphlib.Graph({ multigraph: true });
-  g.setGraph({ rankdir: "TB", nodesep: vertical ? 34 : 18, ranksep: RANK_SEP, marginx: 0, marginy: 0 });
-  g.setDefaultEdgeLabel(() => ({}));
-  for (const b of blocks) g.setNode(b.key, { width: size(b), height: cM });
   const unions = model.unions.filter((u) => inSet.has(blockOf.get(u.h ?? u.single)));
-  for (const u of unions) {
-    const src = blockOf.get(u.h ?? u.single);
-    for (const c of u.children) {
-      const dst = blockOf.get(c);
-      if (dst !== src && inSet.has(dst)) g.setEdge(src.key, dst.key, { minlen: 1, weight: 1 }, `${u.key}>${c}`);
+  const NODE_SEP = vertical ? 34 : 18;
+  // block centres (abstract frame) and, for dagre, the routed points of long edges
+  const node = new Map();
+  let edgePoints = () => null;
+  let primary = null; // birth layout: "src>dst" links that shape the tree; the others are drawn as curves
+  if (siblingOrder === "birth") {
+    primary = birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SEP, eldestFirst: !vertical }, node);
+  } else {
+    const g = new dagre.graphlib.Graph({ multigraph: true });
+    g.setGraph({ rankdir: "TB", nodesep: NODE_SEP, ranksep: RANK_SEP, marginx: 0, marginy: 0 });
+    g.setDefaultEdgeLabel(() => ({}));
+    for (const b of blocks) g.setNode(b.key, { width: size(b), height: cM });
+    for (const u of unions) {
+      const src = blockOf.get(u.h ?? u.single);
+      for (const c of u.children) {
+        const dst = blockOf.get(c);
+        if (dst !== src && inSet.has(dst)) g.setEdge(src.key, dst.key, { minlen: 1, weight: 1 }, `${u.key}>${c}`);
+      }
     }
+    dagre.layout(g);
+    for (const b of blocks) node.set(b.key, g.node(b.key));
+    edgePoints = (src, dst, name) => g.edge(src, dst, name)?.points || null;
   }
-  dagre.layout(g);
 
   // abstract positions of every member
   const ap = new Map();
   const order = new Map(blocks.map((b) => [b, [...b.members]]));
   const place = (b) => {
-    const n = g.node(b.key);
+    const n = node.get(b.key);
     const start = n.x - size(b) / 2;
     order.get(b).forEach((id, i) => ap.set(id, { u: start + i * (cC + GAP) + cC / 2, v: n.y }));
   };
@@ -208,7 +221,7 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
   const dropU = (u) => (u.single != null ? ap.get(u.single).u : (ap.get(u.h).u + ap.get(u.w).u) / 2);
 
   // Generation by generation, mirror a block when that brings members closer to their parents.
-  const sorted = [...blocks].sort((a, b) => g.node(a.key).y - g.node(b.key).y);
+  const sorted = [...blocks].sort((a, b) => node.get(a.key).y - node.get(b.key).y);
   for (const b of sorted) {
     place(b);
     if (b.members.length < 2) continue;
@@ -267,20 +280,21 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
   const links = [];
   for (const u of out) {
     const src = blockOf.get(u.h ?? u.single);
-    const rowEnd = g.node(src.key).y + cM / 2;
+    const rowEnd = node.get(src.key).y + cM / 2;
     for (const c of u.children) {
       const dst = blockOf.get(c);
       if (!inSet.has(dst) || dst === src) continue;
       const p = ap.get(c);
       const top = p.v - cM / 2;
-      const long = top - rowEnd > RANK_SEP + 8;
+      // a second parent family in the birth layout (e.g. a cousin marriage) is joined with a curve
+      const cross = primary && !primary.has(`${src.key}>${dst.key}`);
+      const long = cross || top - rowEnd > RANK_SEP + 8;
       let cmds;
       if (!long) {
         const bus = rowEnd + (top - rowEnd) / 2;
         cmds = [["M", [u.du, u.dv]], ["L", [u.du, bus]], ["L", [p.u, bus]], ["L", [p.u, top]]];
       } else {
-        const e = g.edge(src.key, dst.key, `${u.key}>${c}`);
-        const mids = (e?.points || []).slice(1, -1).map((q) => [q.x, q.y]);
+        const mids = (edgePoints(src.key, dst.key, `${u.key}>${c}`) || []).slice(1, -1).map((q) => [q.x, q.y]);
         const pts = [[u.du, rowEnd + 16], ...mids, [p.u, top - 16]];
         cmds = [["M", [u.du, u.dv]], ["L", pts[0]]];
         for (let i = 1; i < pts.length; i++) {
@@ -298,7 +312,7 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
   const rowMap = new Map();
   let minU = Infinity;
   for (const b of blocks) {
-    const n = g.node(b.key);
+    const n = node.get(b.key);
     minU = Math.min(minU, n.x - size(b) / 2);
     const v = Math.round(n.y);
     if (!rowMap.has(v)) rowMap.set(v, []);
@@ -332,7 +346,7 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
     grow(q.x, q.y, cw / 2, ch / 2 + 14);
   }
   for (const b of blocks) {
-    const n = g.node(b.key);
+    const n = node.get(b.key);
     blockPos.set(b.key, { center: map(n.x, n.y), after: map(n.x, n.y + cM / 2 + 22) });
   }
   for (const r of rows) grow(r.x, r.y, 62, 24);
@@ -351,6 +365,101 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
     markers: model.markers,
     bounds: { x: x0 - M, y: y0 - M, w: x1 - x0 + 2 * M, h: y1 - y0 + 2 * M },
   };
+}
+
+/**
+ * Siblings in birth order. Without other information they are ranked by year of birth (then by
+ * the order they were entered); a "فرزند چندم" puts someone at exactly that place.
+ * @param {(item:any)=>number} idOf  person id of an item (items may be ids or wrappers)
+ */
+export function sortSiblings(fam, items, idOf = (x) => x) {
+  const p = (it) => fam.get(Math.abs(idOf(it)));
+  const year = (it) => yearOf(p(it)?.birth_date);
+  const byYear = [...items].sort((a, b) => (year(a) && year(b) ? year(a) - year(b) : year(a) ? -1 : year(b) ? 1 : 0) || Math.abs(idOf(a)) - Math.abs(idOf(b)));
+  const rank = new Map(byYear.map((it, i) => [it, i + 1]));
+  const explicit = (it) => p(it)?.birth_order ?? null;
+  const place = (it) => explicit(it) ?? rank.get(it);
+  return [...items].sort((a, b) => place(a) - place(b) || (explicit(b) != null) - (explicit(a) != null) || rank.get(a) - rank.get(b));
+}
+
+/**
+ * Tree layout with siblings in birth order. Every block hangs under one parent family (the
+ * nearest; the father's on a tie) and each family gets its own band, so nothing overlaps;
+ * a block's other parent family is linked with a curve. Rows are the longest path from the
+ * top, as with dagre. Fills `node` with block centres; returns the "src>dst" tree links.
+ */
+function birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SEP, eldestFirst }, node) {
+  const { blockOf, fam } = model;
+  const parents = new Map(blocks.map((b) => [b, []]));
+  for (const u of unions) {
+    const src = blockOf.get(u.h ?? u.single);
+    for (const c of u.children) {
+      const dst = blockOf.get(c);
+      if (dst !== src && inSet.has(dst)) parents.get(dst).push({ src, child: c, father: u.h ?? (fam.get(Math.abs(u.single))?.gender === "male" ? u.single : null) });
+    }
+  }
+  const rank = new Map();
+  const rankOf = (b, seen = new Set()) => {
+    if (rank.has(b)) return rank.get(b);
+    if (seen.has(b)) return 0; // cycle guard (shouldn't happen in a family)
+    seen.add(b);
+    const r = Math.max(0, ...parents.get(b).map((p) => rankOf(p.src, seen) + 1));
+    rank.set(b, r);
+    return r;
+  };
+  blocks.forEach((b) => rankOf(b));
+
+  const kids = new Map(blocks.map((b) => [b, []]));
+  const tree = new Set();
+  const roots = [];
+  for (const b of blocks) {
+    const ps = parents.get(b);
+    if (!ps.length) {
+      roots.push({ b, child: b.members[0] });
+      continue;
+    }
+    // nearest parent family; on a tie, the one the child's father belongs to
+    const best = [...ps].sort((x, y) => rank.get(y.src) - rank.get(x.src) || (y.father != null) - (x.father != null))[0];
+    kids.get(best.src).push({ b, child: best.child });
+    tree.add(`${best.src.key}>${b.key}`);
+  }
+  const sortKids = (list) => {
+    const sorted = sortSiblings(fam, list, (k) => k.child);
+    list.splice(0, list.length, ...sorted);
+    return list;
+  };
+  const width = new Map();
+  const widthOf = (b) => {
+    if (width.has(b)) return width.get(b);
+    const ks = sortKids(kids.get(b));
+    const inner = ks.reduce((s, k) => s + widthOf(k.b), 0) + NODE_SEP * Math.max(0, ks.length - 1);
+    const w = Math.max(size(b), inner);
+    width.set(b, w);
+    return w;
+  };
+  // vertical RTL: the eldest on the right; horizontal: the eldest on top
+  const lay = (list) => (eldestFirst ? list : [...list].reverse());
+  const place = (b, left) => {
+    const w = widthOf(b);
+    const ks = lay(kids.get(b));
+    const inner = ks.reduce((s, k) => s + widthOf(k.b), 0) + NODE_SEP * Math.max(0, ks.length - 1);
+    let x = left + (w - inner) / 2;
+    const centres = [];
+    for (const k of ks) {
+      centres.push(place(k.b, x));
+      x += widthOf(k.b) + NODE_SEP;
+    }
+    let c = centres.length ? (centres[0] + centres[centres.length - 1]) / 2 : left + w / 2;
+    c = Math.min(Math.max(c, left + size(b) / 2), left + w - size(b) / 2);
+    node.set(b.key, { x: c, y: rank.get(b) * (cM + RANK_SEP) + cM / 2 });
+    return c;
+  };
+  let x = 0;
+  for (const r of lay(sortKids(roots))) {
+    place(r.b, x);
+    x += widthOf(r.b) + NODE_SEP * 3;
+  }
+  return tree;
 }
 
 /** Convenience: model + positions in one go. */
@@ -604,9 +713,9 @@ export class TreeView {
    * @param {import('./kinship.js').Family} fam   people to draw
    * @param {import('./kinship.js').Family} full  whole family
    */
-  render(fam, full, state, { relayout = true, orientation = "vertical", gens = null } = {}) {
+  render(fam, full, state, { relayout = true, orientation = "vertical", gens = null, siblingOrder = "auto" } = {}) {
     if (relayout || !this.layout) {
-      this.layout = layoutTree(fam, full, { orientation, cardH: cardHeight(state.noteLines), gens });
+      this.layout = layoutTree(fam, full, { orientation, cardH: cardHeight(state.noteLines), gens, siblingOrder });
     }
     drawLayout(this.viewport, this.layout, { ...state, defs: this.defs }, {
       person: (id) => this.opts.onSelectPerson(id),
