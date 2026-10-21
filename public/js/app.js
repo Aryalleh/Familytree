@@ -1,4 +1,5 @@
 import { Family, KIND_LABELS } from "./kinship.js";
+import { DEMO } from "./config.js";
 import { TreeView, lifeSpan, toFa } from "./tree.js";
 import { prepare, planPages, renderPages, PAPERS } from "./print.js";
 import { generations, clanView } from "./generations.js";
@@ -112,6 +113,7 @@ const S = {
   mode: store.get("ft_mode") === "family" ? "family" : "all",
   panelTab: "family",
   gens: new Map(),
+  audit: new Map(),
   access: null,
   perm: null,
   clans: [],
@@ -290,6 +292,13 @@ function renderMain() {
   const u = S.user;
   $("#app").innerHTML = `
     <div class="shell">
+      ${
+        DEMO
+          ? `<div class="demo-banner">نسخهٔ نمایشی: داده‌ها ساختگی‌اند و تغییرات فقط در همین مرورگر می‌ماند.
+              <button class="btn small" data-act="demo-reset">شروع دوباره</button>
+              <a href="https://github.com/Aryalleh/Familytree" target="_blank" rel="noopener">کد در گیت‌هاب</a></div>`
+          : "<div></div>"
+      }
       <header class="topbar">
         <div class="brand"><span class="brand-logo">🌳</span><span class="brand-name">شجره‌نامه خاندان</span></div>
         <select class="input clan-select" aria-label="طایفه" title="طایفه" hidden></select>
@@ -298,7 +307,7 @@ function renderMain() {
           <button class="nav-btn" data-act="list" title="فهرست افراد"><span class="ico">👥</span><span class="lbl">فهرست افراد</span></button>
           <button class="nav-btn" data-act="finder" title="خویشاوندی"><span class="ico">🔗</span><span class="lbl">خویشاوندی</span></button>
           <button class="nav-btn" data-act="add" title="افزودن شخص" hidden><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>
-          <button class="nav-btn" data-act="changes" title="آخرین تغییرات"><span class="ico">🕘</span><span class="lbl">تغییرات</span></button>
+          <button class="nav-btn" data-act="changes" title="آخرین تغییرات" ${isAdmin() ? "" : "hidden"}><span class="ico">🕘</span><span class="lbl">تغییرات</span></button>
           <button class="nav-btn" data-act="sync" title="آفلاین و همگام‌سازی"><span class="ico">☁️</span><span class="lbl">آفلاین</span><span class="net-chip" hidden></span></button>
           <button class="nav-btn" data-act="settings" title="تنظیمات"><span class="ico">🛠️</span><span class="lbl">تنظیمات</span></button>
           ${isAdmin() ? `<button class="nav-btn" data-act="users" title="مدیریت"><span class="ico">⚙️</span><span class="lbl">مدیریت</span></button>` : ""}
@@ -314,7 +323,7 @@ function renderMain() {
             <span class="user-avatar">${esc((u.display_name || u.username).charAt(0))}</span>
             <span class="user-name">${esc(u.display_name || u.username)}<small>${ROLE_FA[u.role]}</small></span>
           </button>
-          <button class="btn ghost small" data-act="logout" title="خروج">⎋<span class="lbl"> خروج</span></button>
+          <button class="btn ghost small" data-act="logout" title="خروج" ${DEMO ? "hidden" : ""}>⎋<span class="lbl"> خروج</span></button>
         </div>
       </header>
       <div class="main no-panel">
@@ -371,6 +380,11 @@ function renderMain() {
     boot();
   });
   $("[data-act=sync]").addEventListener("click", () => openSync());
+  $("[data-act=demo-reset]")?.addEventListener("click", async () => {
+    if (!confirm("همهٔ تغییرات شما در نسخهٔ نمایشی پاک شود و داده‌های نمونه برگردد؟")) return;
+    await S.demo.reset();
+    location.reload();
+  });
   $("[data-act=changes]").addEventListener("click", () => openRecentChanges());
   window.addEventListener("online", () => checkOnline());
   window.addEventListener("offline", () => goOffline());
@@ -471,6 +485,7 @@ async function loadTree({ fit = false } = {}) {
     S.people = merged.people;
     S.marriages = merged.marriages;
     S.access = data.access || null;
+    S.audit = new Map((data.audit || []).map((a) => [a.id, a]));
     const a = data.access || { all: isAdmin() };
     S.perm = a.all
       ? { all: true }
@@ -866,6 +881,7 @@ function renderPanel() {
       ${p.birth_place ? `<dt>محل تولد</dt><dd>${esc(p.birth_place)}</dd>` : ""}
       ${p.is_deceased ? `<dt>وفات</dt><dd>${esc(toFa(p.death_date) || "درگذشته")}</dd>` : ""}
       <dt>شناسه</dt><dd>P-${toFa(String(p.id).padStart(4, "0"))}</dd>
+      ${auditLines(p.id)}
     </dl>
     ${
       editor
@@ -908,9 +924,9 @@ function renderPanel() {
         <button data-tab="info" class="${tab === "info" ? "active" : ""}">مشخصات</button>
         <button data-tab="family" class="${tab === "family" ? "active" : ""}">خانواده</button>
         <button data-tab="notes" class="${tab === "notes" ? "active" : ""}">یادداشت‌ها</button>
-        ${isTemp(p.id) ? "" : `<button data-tab="history" class="${tab === "history" ? "active" : ""}">تاریخچه</button>`}
+        ${isTemp(p.id) || !isAdmin() ? "" : `<button data-tab="history" class="${tab === "history" ? "active" : ""}">تاریخچه</button>`}
       </div>
-      <div class="ptab-body">${tab === "info" ? infoTab : tab === "notes" ? notesTab : tab === "history" && !isTemp(p.id) ? `<div data-history class="muted">در حال بارگذاری…</div>` : familyTab}</div>
+      <div class="ptab-body">${tab === "info" ? infoTab : tab === "notes" ? notesTab : tab === "history" && !isTemp(p.id) && isAdmin() ? `<div data-history class="muted">در حال بارگذاری…</div>` : familyTab}</div>
     </div>
 
     ${
@@ -1808,6 +1824,13 @@ async function openAdmin(tab = "users") {
       fail(e);
     }
   });
+  if (DEMO) {
+    // no server to download from: build the backup in the page
+    $('a[href="/api/export"]', el).addEventListener("click", (e) => {
+      e.preventDefault();
+      download(`familytree-demo-${stamp()}.json`, S.demo.exportData());
+    });
+  }
   $("[data-import]", el).addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file || !confirm("همهٔ داده‌های فعلی جایگزین شود؟")) return;
@@ -1830,6 +1853,15 @@ const ACTION_FA = { create: "ایجاد", update: "ویرایش", delete: "حذ�
 const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id"];
 
 const when = (at) => toFa(new Date(`${String(at).replace(" ", "T")}Z`).toLocaleString("fa-IR", { dateStyle: "medium", timeStyle: "short" }));
+
+/** Admins see who added a person and who changed them last (from the change log). */
+function auditLines(id) {
+  const a = isAdmin() && S.audit?.get(id);
+  if (!a) return "";
+  const who = (name) => (name ? esc(name) : `<span class="muted">پیش از ثبت تاریخچه</span>`);
+  return `<dt>افزوده توسط</dt><dd>${who(a.created_by)} <span class="muted">${when(a.created_at)}</span></dd>
+    ${a.edits ? `<dt>آخرین تغییر</dt><dd>${who(a.updated_by)} <span class="muted">${when(a.updated_at)} · ${toFa(a.edits)} ویرایش</span></dd>` : ""}`;
+}
 
 /** A person's versions, newest first, with what changed and a way back to any of them. */
 async function loadPersonHistory(p, box) {
@@ -2443,4 +2475,6 @@ function initSearch() {
   });
 }
 
-boot();
+// The demo build answers /api/* inside the browser (js/demo.js) instead of a server.
+if (DEMO) import("./demo.js").then((d) => ((S.demo = d), d.install())).then(boot);
+else boot();

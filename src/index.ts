@@ -379,6 +379,16 @@ function requireClan(clans: Clan[], id: number) {
   if (!clans.some((c) => c.id === id)) throw new HttpError(400, "طایفهٔ انتخاب‌شده وجود ندارد");
 }
 
+/** First and latest history entry of every person: who added them, who changed them last. */
+async function auditTrail(env: Env) {
+  const { results } = await env.DB.prepare(
+    `SELECT g.entity_id AS id, f.user_name AS created_by, f.at AS created_at, l.user_name AS updated_by, l.at AS updated_at, g.edits
+     FROM (SELECT entity_id, MIN(id) AS first_id, MAX(id) AS last_id, COUNT(*) - 1 AS edits FROM history WHERE entity = 'person' GROUP BY entity_id) g
+     JOIN history f ON f.id = g.first_id JOIN history l ON l.id = g.last_id`,
+  ).all();
+  return results;
+}
+
 const getTree: Handler = async ({ env, user }) => {
   const me = require(user, "viewer");
   const { list, marriages, clans, perms } = await loadScoped(env, me);
@@ -393,6 +403,8 @@ const getTree: Handler = async ({ env, user }) => {
   const shownClans = new Set(people.map((p) => p.clan_id));
   return json({
     people,
+    // who added and who last changed each person: admins only
+    audit: me.role === "admin" ? await auditTrail(env) : undefined,
     marriages: marriages.filter((m) => canSee(perms, m.husband_id) && canSee(perms, m.wife_id)),
     clans: perms.all ? clans : clans.filter((c) => shownClans.has(c.id) || perms.addClans!.has(c.id) || perms.addClans!.has(null)),
     access: perms.all
@@ -761,8 +773,9 @@ interface HistoryRow {
 
 const historyOut = (r: HistoryRow) => ({ ...r, changed: JSON.parse(r.changed), data: JSON.parse(r.data) });
 
+// the change log (who did what, when) is for admins only
 const entityHistory = (entity: Entity): Handler => async ({ env, user, params }) => {
-  const me = require(user, "viewer");
+  const me = require(user, "admin");
   const id = optId(params[0])!;
   const { people, marriages, perms } = await loadScoped(env, me);
   if (entity === "person" ? !people.has(id) && me.role !== "admin" : false) throw new HttpError(404, "شخص یافت نشد");
@@ -779,7 +792,7 @@ const entityHistory = (entity: Entity): Handler => async ({ env, user, params })
 
 /** Recent changes the user is allowed to see (deleted people: admins only). */
 const recentHistory: Handler = async ({ env, url, user }) => {
-  const me = require(user, "viewer");
+  const me = require(user, "admin");
   const { people, perms } = await loadScoped(env, me);
   const before = optId(url.searchParams.get("before")) ?? 2 ** 53;
   const out: ReturnType<typeof historyOut>[] = [];

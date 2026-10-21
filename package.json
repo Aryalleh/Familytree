@@ -10,7 +10,10 @@
     "db:migrate:remote": "wrangler d1 migrations apply familytree --remote",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.js",
-    "vendor": "node scripts/vendor.js"
+    "vendor": "node scripts/vendor.js",
+    "build:demo": "node scripts/build-demo.js",
+    "dev:demo": "npm run build:demo && wrangler dev -c wrangler.demo.toml --port 8788",
+    "deploy:demo": "npm run build:demo && wrangler deploy -c wrangler.demo.toml"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261019.1",

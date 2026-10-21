@@ -2,6 +2,17 @@
 
 A Persian (RTL) family-tree maker that runs entirely on **Cloudflare Workers + D1**: no build step and no CSS framework.
 
+![شجره‌نامه خاندان](docs/screenshot.jpg)
+
+## 🔍 دمو
+
+یک نسخهٔ نمایشی بدون دیتابیس هم ساخته می‌شود. همهٔ برنامه در مرورگر بازدیدکننده اجرا می‌شود، با داده‌های ساختگی دو طایفه (رحیمی و صالحی)، و تغییرات فقط در همان مرورگر می‌ماند. هیچ دادهٔ واقعی‌ای در آن نیست.
+
+```bash
+npm run dev:demo      # روی http://localhost:8788
+npm run deploy:demo   # انتشار روی Cloudflare با نام familytree-demo (فقط فایل‌های ثابت، بدون Worker و D1)
+```
+
 ## امکانات
 
 - **اولین کاربر = مدیر**: نیازی به راه‌اندازی اولیه نیست. نخستین کسی که وارد سایت شود حساب مدیر را می‌سازد (به‌صورت اتمیک؛ دو درخواست همزمان نمی‌توانند هر دو مدیر شوند).
@@ -23,7 +34,7 @@ A Persian (RTL) family-tree maker that runs entirely on **Cloudflare Workers + D
   - اگر همان فیلد به مقدار دیگری تغییر کرده باشد، پنجرهٔ **تعارض** باز می‌شود و برای هر فیلد «نسخهٔ سرور» یا «نسخهٔ شما» انتخاب می‌شود.
   - حذفِ موردی که پس از بارگذاری تغییر کرده هم پیش از انجام، تأیید گرفته می‌شود.
   - زبانهٔ «تاریخچه» در پنل هر شخص همهٔ نسخه‌ها را نشان می‌دهد، با امکان «بازگرداندن به این نسخه».
-  - «🕘 تغییرات» آخرین تغییرات کل شجره‌نامه را نشان می‌دهد و مدیر می‌تواند افراد حذف‌شده را، همراه با ازدواج‌هایشان، بازیابی کند.
+  - تاریخچه و «🕘 تغییرات» (چه کسی، کِی، چه چیزی) **فقط برای مدیر** نمایش داده می‌شود. مدیر در مشخصات هر شخص می‌بیند او را چه کسی اضافه کرده و آخرین بار چه کسی تغییرش داده است، و می‌تواند افراد حذف‌شده را همراه با ازدواج‌هایشان بازیابی کند.
 - **نمایش نسل‌ها**: از نوار ابزار سمت چپ می‌توان فقط نسل‌های «از … تا …» را دید. نسل ۱ قدیمی‌ترین نسل است و همسرانی که از بیرون آمده‌اند هم‌نسل همسرشان حساب می‌شوند.
 - **طایفه‌ها (خاندان‌ها)**: هر طایفه یک درخت جداگانه است. عروس‌ها و دامادها می‌توانند عضو طایفهٔ خودشان باشند و شجره‌نامهٔ خانوادهٔ خودشان را داشته باشند.
   - در درخت هر طایفه، همسران و فرزندانِ دختران که از طایفهٔ دیگری هستند «مهمان» دیده می‌شوند، با برچسب طایفه‌شان و دکمهٔ «نمایش شجره‌نامهٔ طایفهٔ …».
@@ -80,6 +91,7 @@ npm run deploy                           # applies D1 migrations remotely, then 
 | `public/js/tree.js` | Layout (dagre over couple blocks) and SVG rendering, pan/zoom, minimap |
 | `public/js/print.js` | Print planning: generation range, branch-per-page pagination, note list |
 | `public/js/offline.js` | Offline snapshot, queue of offline edits, replay / changes file |
+| `public/js/demo.js` | In-browser stand-in for the API, used only by the demo build (`scripts/build-demo.js`, `wrangler.demo.toml`, sample data in `demo/data.json`) |
 | `public/sw.js` | Service worker that keeps the app shell available offline |
 | `public/js/app.js` | UI |
 | `public/vendor/dagre.esm.js` | Vendored [dagre](https://github.com/dagrejs/dagre) (`npm run vendor` refreshes it) |

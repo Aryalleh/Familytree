@@ -280,7 +280,7 @@ textarea.input {
 .shell {
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
   height: 100vh;
   height: 100dvh;
 }
@@ -1378,6 +1378,23 @@ table.users td {
   .user-menu .btn {
     padding: 4px 6px;
   }
+}
+
+/* ---------- demo ---------- */
+
+.demo-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  font-size: 13.5px;
+  background: color-mix(in srgb, var(--k-inlaw) 14%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--k-inlaw) 35%, var(--border));
+}
+.demo-banner .btn {
+  padding: 2px 10px;
 }
 
 /* ---------- clans ---------- */

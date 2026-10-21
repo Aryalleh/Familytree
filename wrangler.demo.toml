@@ -1,0 +1,6 @@
+# Public demo: static files only (no Worker code, no database). Build with `npm run build:demo`.
+name = "familytree-demo"
+compatibility_date = "2025-10-01"
+
+[assets]
+directory = "./dist-demo"
