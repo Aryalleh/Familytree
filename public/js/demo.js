@@ -2,7 +2,8 @@
 // shown on a static site with no database. Data lives in this browser's localStorage and starts
 // from /demo-data.json; the visitor is signed in as an admin and can try everything.
 
-const KEY = "ft_demo_db";
+// bump the suffix when demo/data.json changes, so returning visitors get the new sample
+const KEY = "ft_demo_db_2";
 const USER = { id: 1, username: "demo", display_name: "کاربر نمایشی", role: "admin", prefs: "{}" };
 const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id"];
 const MARRIAGE_FIELDS = ["husband_id", "wife_id", "status", "marriage_date", "end_date", "notes"];
