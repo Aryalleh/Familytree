@@ -8,6 +8,12 @@
 
 بدون ثبت‌نام، با چهار طایفهٔ ساختگی در شش نسل. هر تغییری بدهید فقط در مرورگر خودتان می‌ماند.
 
+### ساخت شجره‌نامهٔ خانوادهٔ خودتان، با یک کلیک
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Aryalleh/Familytree)
+
+دکمه را بزنید و وارد حساب رایگان Cloudflare خودتان شوید. Cloudflare یک نسخه از این پروژه را در GitHub شما می‌سازد، دیتابیس را خودکار ایجاد می‌کند و برنامه را منتشر می‌کند. سپس آدرسی را که می‌دهد باز کنید و ثبت‌نام کنید؛ نخستین نفر مدیر می‌شود. نیازی به دادن توکن یا رمز به کسی نیست.
+
 ![نمای خانوادهٔ نزدیک با نسبت‌ها](docs/screenshot.jpg)
 
 ![درخت یک طایفه با عروس‌ها و دامادهای طایفه‌های دیگر](docs/screenshot-clans.jpg)
@@ -96,7 +102,9 @@ A Persian (RTL) family-tree app for several intermarried clans, running on **Clo
 
 Features: generational tree layout with couples and pan/zoom; a Persian kinship engine (blood, in-law and step relations, cousin marriages, multiple relations at once); separate trees per clan with spouses from other clans shown as guests; per-user grants and access groups (clan / branch / level / generation limit) enforced server-side; installable offline PWA with automatic sync and three-way merge with a conflict dialog; per-record version history with restore; multi-page print that keeps each branch on one page.
 
-Setup: Node.js 22+, then `npm install`, `npx wrangler login`, `npx wrangler d1 create familytree` (put the id in `wrangler.toml`), and `npm run deploy`. The first account created becomes the admin.
+One-click setup: [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Aryalleh/Familytree) — copies the repo to your GitHub, provisions the D1 database and applies the migrations (the `deploy` script references the `DB` binding).
+
+Manual setup: Node.js 22+, then `npm install`, `npx wrangler login`, `npx wrangler d1 create familytree` (put the id in `wrangler.toml`), and `npm run deploy`. The first account created becomes the admin.
 
 ### Project layout
 

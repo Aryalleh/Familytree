@@ -10,6 +10,7 @@ run_worker_first = ["/api/*"]
 [[d1_databases]]
 binding = "DB"
 database_name = "familytree"
-# Replace with the id printed by: npx wrangler d1 create familytree
+# Replaced automatically by the "Deploy to Cloudflare" button; for a manual setup use the id
+# printed by: npx wrangler d1 create familytree
 database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "migrations"

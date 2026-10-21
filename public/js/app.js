@@ -321,6 +321,7 @@ function renderMain() {
       ${
         DEMO
           ? `<div class="demo-banner">نسخهٔ نمایشی: داده‌ها ساختگی‌اند و تغییرات فقط در همین مرورگر می‌ماند.
+              <button class="btn small primary" data-act="deploy-own">🌳 ساخت شجره‌نامهٔ خودم</button>
               <button class="btn small" data-act="demo-reset">شروع دوباره</button>
               <a href="https://github.com/Aryalleh/Familytree" target="_blank" rel="noopener">کد در گیت‌هاب</a></div>`
           : "<div></div>"
@@ -406,6 +407,7 @@ function renderMain() {
     boot();
   });
   $("[data-act=sync]").addEventListener("click", () => openSync());
+  if (DEMO) setupDeployCard();
   $("[data-act=demo-reset]")?.addEventListener("click", async () => {
     if (!confirm("همهٔ تغییرات شما در نسخهٔ نمایشی پاک شود و داده‌های نمونه برگردد؟")) return;
     await S.demo.reset();
@@ -1993,6 +1995,51 @@ async function openRecentChanges() {
       }
     }),
   );
+}
+
+// ---------------------------------------------------------------------------
+// demo: "build my own family tree" card
+
+const REPO_URL = "https://github.com/Aryalleh/Familytree";
+
+/**
+ * A card at the side of the demo with Cloudflare's "Deploy to Cloudflare" button: it copies the
+ * project to the visitor's own account, creates the database and deploys it — the visitor signs
+ * in to Cloudflare themselves, so nobody has to hand over an API token.
+ */
+function setupDeployCard() {
+  const card = document.createElement("aside");
+  card.className = "deploy-card";
+  card.hidden = true;
+  card.innerHTML = `
+    <button class="btn ghost small close" data-close aria-label="بستن">✕</button>
+    <h3>🌳 شجره‌نامهٔ خانوادهٔ خودتان را بسازید</h3>
+    <p>رایگان، روی حساب Cloudflare خودتان؛ داده‌ها فقط در اختیار شماست.</p>
+    <ol>
+      <li>یک حساب رایگان <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">Cloudflare</a> و یک حساب <a href="https://github.com/signup" target="_blank" rel="noopener">GitHub</a> داشته باشید.</li>
+      <li>دکمهٔ زیر را بزنید و وارد حساب Cloudflare خودتان شوید. برنامه و دیتابیس خودکار ساخته می‌شوند.</li>
+      <li>آدرسی را که در پایان داده می‌شود باز کنید و ثبت‌نام کنید؛ نخستین نفر مدیر شجره‌نامه می‌شود.</li>
+    </ol>
+    <a class="deploy-btn" href="https://deploy.workers.cloudflare.com/?url=${REPO_URL}" target="_blank" rel="noopener">
+      <span class="cf-cloud">☁</span> Deploy to Cloudflare</a>
+    <p class="hint">نیازی نیست توکن یا رمزی به ما بدهید؛ ورود مستقیم در خود سایت Cloudflare انجام می‌شود. <a href="${REPO_URL}#readme" target="_blank" rel="noopener">راهنمای کامل</a></p>`;
+  const pill = document.createElement("button");
+  pill.className = "btn primary deploy-pill";
+  pill.textContent = "🌳 ساخت شجره‌نامهٔ خودم";
+  document.body.append(card, pill);
+  const show = (on) => {
+    card.hidden = !on;
+    pill.hidden = on;
+  };
+  $("[data-close]", card).addEventListener("click", () => {
+    show(false);
+    store.set("ft_deploy_seen", "1");
+  });
+  pill.addEventListener("click", () => show(true));
+  $("[data-act=deploy-own]")?.addEventListener("click", () => show(true));
+  show(false);
+  // first visit: slide in once the visitor has had a look around
+  if (!store.get("ft_deploy_seen")) setTimeout(() => card.hidden && show(true), 8000);
 }
 
 // ---------------------------------------------------------------------------

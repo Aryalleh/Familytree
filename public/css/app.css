@@ -1397,6 +1397,80 @@ table.users td {
   padding: 2px 10px;
 }
 
+.deploy-card {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 45;
+  width: min(360px, calc(100vw - 32px));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.25);
+  padding: 16px 18px;
+  font-size: 14px;
+  animation: slide-in 0.35s ease-out;
+}
+.deploy-card h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  padding-inline-end: 28px;
+}
+.deploy-card p {
+  margin: 0 0 8px;
+}
+.deploy-card ol {
+  margin: 0 0 12px;
+  padding-inline-start: 20px;
+}
+.deploy-card li {
+  margin-bottom: 4px;
+}
+.deploy-card .close {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+}
+.deploy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 18px;
+  border-radius: 8px;
+  background: #f38020;
+  color: #fff;
+  font-weight: 700;
+  text-decoration: none;
+  direction: ltr;
+  font-family: system-ui, sans-serif;
+}
+.deploy-btn:hover {
+  background: #e06d10;
+}
+.cf-cloud {
+  font-size: 18px;
+  line-height: 1;
+}
+.deploy-pill {
+  position: fixed;
+  left: 16px;
+  bottom: 172px;
+  z-index: 44;
+  box-shadow: var(--shadow);
+}
+@keyframes slide-in {
+  from {
+    transform: translateX(-24px);
+    opacity: 0;
+  }
+}
+@media (max-width: 820px) {
+  .deploy-pill {
+    bottom: 16px;
+  }
+}
+
 /* ---------- clans ---------- */
 
 .clan-select {
