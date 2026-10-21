@@ -41,6 +41,7 @@
 - **نخستین کسی که وارد شود، مدیر می‌شود.** نیازی به راه‌اندازی اولیه نیست.
 - مدیر برای هر کاربر تعیین می‌کند: کدام طایفه، کل طایفه یا کدام شاخه و زیرشاخه، دیدن یا افزودن و ویرایش یا حذف، و تا کدام نسل.
 - دسترسی‌ها در **گروه‌های دسترسی** دسته‌بندی می‌شوند (مثلاً «ویرایشگران طایفهٔ صالحی»).
+- نقش **پیشنهاددهنده**: کسی که اجازهٔ ویرایش ندارد، هر چه را می‌بیند اصلاح می‌کند یا اشتباهی را گزارش می‌دهد و با یک توضیح برای مدیر می‌فرستد. مدیر تغییرات را فیلدبه‌فیلد می‌بیند؛ اگر درست بود با یک دکمه در شجره‌نامه اعمال می‌کند و اگر نه، رد می‌کند و پیشنهاد از سرور پاک می‌شود.
 - همه‌چیز روی سرور کنترل می‌شود. اطلاعاتی که کسی اجازهٔ دیدنش را ندارد اصلاً به گوشی یا مرورگرش نمی‌رسد.
 
 ### آفلاین و همگام‌سازی
@@ -101,7 +102,7 @@ npm run deploy:demo    # فقط فایل‌های ثابت با نام familytre
 
 A Persian (RTL) family-tree app for several intermarried clans, running on **Cloudflare Workers + D1** with no build step and no UI framework. **[Live demo](https://familytree-demo.m-cyber-warrior.workers.dev)** (runs entirely in your browser with sample data).
 
-Features: generational tree layout with couples and pan/zoom; a Persian kinship engine (blood, in-law and step relations, cousin marriages, multiple relations at once); separate trees per clan with spouses from other clans shown as guests; per-user grants and access groups (clan / branch / level / generation limit) enforced server-side; installable offline PWA with automatic sync and three-way merge with a conflict dialog; per-record version history with restore; multi-page print that keeps each branch on one page.
+Features: generational tree layout with couples and pan/zoom; a Persian kinship engine (blood, in-law and step relations, cousin marriages, multiple relations at once); separate trees per clan with spouses from other clans shown as guests; per-user grants and access groups (clan / branch / level / generation limit) enforced server-side; a suggester role whose edits go to the admin for review (apply or reject); installable offline PWA with automatic sync and three-way merge with a conflict dialog; per-record version history with restore; multi-page print that keeps each branch on one page.
 
 One-click setup: [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Aryalleh/Familytree) — copies the repo to your GitHub, provisions the D1 database and applies the migrations (the `deploy` script references the `DB` binding).
 

@@ -3,7 +3,7 @@
 // from /demo-data.json; the visitor is signed in as an admin and can try everything.
 
 // bump the suffix when demo/data.json changes, so returning visitors get the new sample
-const KEY = "ft_demo_db_3";
+const KEY = "ft_demo_db_4";
 const USER = { id: 1, username: "demo", display_name: "کاربر نمایشی", role: "admin", prefs: "{}" };
 const PERSON_FIELDS = ["first_name", "last_name", "nickname", "gender", "birth_date", "death_date", "is_deceased", "birth_place", "photo_url", "notes", "father_id", "mother_id", "clan_id", "birth_order", "phone", "sons_count", "daughters_count"];
 const MARRIAGE_FIELDS = ["husband_id", "wife_id", "status", "marriage_date", "end_date", "notes"];
@@ -29,7 +29,7 @@ async function load(reset = false) {
   }
   if (!db) {
     const seed = await (await realFetch("/demo-data.json")).json();
-    db = { clans: seed.clans, people: [], marriages: [], history: [], nextId: 1, prefs: "{}" };
+    db = { clans: seed.clans, people: [], marriages: [], history: [], nextId: 1, prefs: "{}", suggestions: seed.suggestions || [] };
     for (const p of seed.people) db.people.push({ ...pick(p, PERSON_FIELDS), id: p.id, version: 1 });
     for (const m of seed.marriages) db.marriages.push({ ...pick(m, MARRIAGE_FIELDS), id: m.id, version: 1 });
     db.nextId = Math.max(0, ...db.people.map((p) => p.id), ...db.marriages.map((m) => m.id)) + 1;
@@ -113,7 +113,20 @@ const routes = [
   ["PUT", /^\/api\/me\/password$/, () => {
     throw new Fail(400, DISABLED);
   }],
-  ["GET", /^\/api\/tree$/, () => ({ people: db.people, marriages: db.marriages, clans: db.clans, access: { all: true }, audit: audit() })],
+  ["GET", /^\/api\/tree$/, () => ({ people: db.people, marriages: db.marriages, clans: db.clans, access: { all: true }, audit: audit(), suggestions: db.suggestions.length })],
+  ["GET", /^\/api\/suggestions$/, () => ({ suggestions: db.suggestions })],
+  ["PUT", /^\/api\/suggestions\/(\d+)$/, (m, b) => {
+    const x = db.suggestions.find((y) => y.id === Number(m[1]));
+    if (!x) throw new Fail(404, "پیشنهاد یافت نشد");
+    x.ops = b.ops || [];
+    return { ok: true };
+  }],
+  ["DELETE", /^\/api\/suggestions\/(\d+)$/, (m) => {
+    const i = db.suggestions.findIndex((x) => x.id === Number(m[1]));
+    if (i < 0) throw new Fail(404, "پیشنهاد یافت نشد");
+    db.suggestions.splice(i, 1);
+    return { ok: true };
+  }],
 
   ["POST", /^\/api\/people$/, (m, b) => {
     const p = cleanPerson(b);

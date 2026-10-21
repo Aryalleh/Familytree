@@ -134,7 +134,7 @@ const login: Handler = async ({ env, request, url }) => {
   const b = await body(request);
   const username = str(b.username, 32);
   const password = String(b.password ?? "");
-  const row = await env.DB.prepare("SELECT id, username, display_name, role, prefs, password_hash FROM users WHERE username = ?")
+  const row = await env.DB.prepare("SELECT id, username, display_name, role, suggester, prefs, password_hash FROM users WHERE username = ?")
     .bind(username)
     .first<User & { password_hash: string }>();
   if (!row || !(await verifyPassword(password, row.password_hash))) {
@@ -179,13 +179,15 @@ const changePassword: Handler = async ({ env, request, user }) => {
 
 const listUsers: Handler = async ({ env, user }) => {
   require(user, "admin");
-  const { results } = await env.DB.prepare("SELECT id, username, display_name, role, created_at FROM users ORDER BY id").all();
+  const { results } = await env.DB.prepare("SELECT id, username, display_name, role, suggester, created_at FROM users ORDER BY id").all();
   return json({ users: results, allowRegistration: await registrationOpen(env) });
 };
 
-function parseRole(v: unknown): Role {
+/** "suggester" is a viewer who may also send suggested changes. */
+function parseRole(v: unknown): { role: Role; suggester: number } {
+  if (v === "suggester") return { role: "viewer", suggester: 1 };
   if (!ROLES.includes(v as Role)) throw new HttpError(400, "نقش نامعتبر است");
-  return v as Role;
+  return { role: v as Role, suggester: 0 };
 }
 
 const createUser: Handler = async ({ env, request, user }) => {
@@ -194,11 +196,11 @@ const createUser: Handler = async ({ env, request, user }) => {
   const username = str(b.username, 32);
   const password = String(b.password ?? "");
   validateCredentials(username, password);
-  const role = parseRole(b.role ?? "viewer");
+  const { role, suggester } = parseRole(b.role ?? "viewer");
   const res = await env.DB.prepare(
-    "INSERT INTO users (username, display_name, password_hash, role) VALUES (?, ?, ?, ?) ON CONFLICT(username) DO NOTHING",
+    "INSERT INTO users (username, display_name, password_hash, role, suggester) VALUES (?, ?, ?, ?, ?) ON CONFLICT(username) DO NOTHING",
   )
-    .bind(username, str(b.display_name, 100) || username, await hashPassword(password), role)
+    .bind(username, str(b.display_name, 100) || username, await hashPassword(password), role, suggester)
     .run();
   if (!res.meta.changes) throw new HttpError(409, "این نام کاربری قبلاً گرفته شده است");
   return json({ id: res.meta.last_row_id }, 201);
@@ -217,11 +219,11 @@ const updateUser: Handler = async ({ env, request, user, params }) => {
   if (!target) throw new HttpError(404, "کاربر یافت نشد");
   const stmts: D1PreparedStatement[] = [];
   if (b.role !== undefined) {
-    const role = parseRole(b.role);
+    const { role, suggester } = parseRole(b.role);
     if (target.role === "admin" && role !== "admin" && (await adminCount(env)) <= 1) {
       throw new HttpError(400, "دست‌کم یک مدیر باید باقی بماند");
     }
-    stmts.push(env.DB.prepare("UPDATE users SET role = ? WHERE id = ?").bind(role, id));
+    stmts.push(env.DB.prepare("UPDATE users SET role = ?, suggester = ? WHERE id = ?").bind(role, suggester, id));
   }
   if (b.display_name !== undefined) {
     stmts.push(env.DB.prepare("UPDATE users SET display_name = ? WHERE id = ?").bind(str(b.display_name, 100), id));
@@ -416,6 +418,69 @@ async function auditTrail(env: Env) {
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// suggestions: changes proposed by a suggester, applied or rejected by an admin
+
+const SUGGESTION_LIMIT = 200_000;
+const OP_TYPES = ["createPerson", "updatePerson", "deletePerson", "createMarriage", "updateMarriage", "deleteMarriage"];
+
+async function suggestionCount(env: Env, me: User): Promise<number> {
+  const q = me.role === "admin" ? env.DB.prepare("SELECT COUNT(*) AS n FROM suggestions") : env.DB.prepare("SELECT COUNT(*) AS n FROM suggestions WHERE user_id = ?").bind(me.id);
+  return (await q.first<{ n: number }>())?.n ?? 0;
+}
+
+const listSuggestions: Handler = async ({ env, user }) => {
+  const me = require(user, "viewer");
+  if (me.role !== "admin" && !me.suggester) throw new HttpError(403, "دسترسی کافی ندارید");
+  const sql = `SELECT s.id, s.user_id, u.display_name AS user_name, u.username, s.person_id, s.message, s.ops, s.created_at
+    FROM suggestions s JOIN users u ON u.id = s.user_id ${me.role === "admin" ? "" : "WHERE s.user_id = ?"} ORDER BY s.id`;
+  const q = me.role === "admin" ? env.DB.prepare(sql) : env.DB.prepare(sql).bind(me.id);
+  const { results } = await q.all<{ ops: string }>();
+  return json({ suggestions: results.map((r) => ({ ...r, ops: JSON.parse(r.ops) })) });
+};
+
+const createSuggestion: Handler = async ({ env, request, user }) => {
+  const me = require(user, "viewer");
+  if (!me.suggester || me.role === "admin") throw new HttpError(403, "نقش شما «پیشنهاددهنده» نیست");
+  const b = await body(request);
+  const message = str(b.message, 4000);
+  const ops = Array.isArray(b.ops) ? b.ops : [];
+  if (ops.some((o) => !o || typeof o !== "object" || !OP_TYPES.includes((o as { type: string }).type))) throw new HttpError(400, "تغییرات پیشنهادی نامعتبر است");
+  if (!message && !ops.length) throw new HttpError(400, "توضیح یا تغییری برای ارسال نیست");
+  const opsJson = JSON.stringify(ops);
+  if (opsJson.length > SUGGESTION_LIMIT) throw new HttpError(413, "پیشنهاد بیش از حد بزرگ است؛ آن را در چند بخش بفرستید");
+  const personId = optId(b.person_id);
+  const res = await env.DB.prepare("INSERT INTO suggestions (user_id, person_id, message, ops) VALUES (?, ?, ?, ?)")
+    .bind(me.id, personId, message, opsJson)
+    .run();
+  return json({ id: res.meta.last_row_id }, 201);
+};
+
+/** Admin: what is left of a suggestion after applying part of it. */
+const updateSuggestion: Handler = async ({ env, request, user, params }) => {
+  require(user, "admin");
+  const id = optId(params[0])!;
+  const b = await body(request);
+  if (!Array.isArray(b.ops)) throw new HttpError(400, "تغییرات پیشنهادی نامعتبر است");
+  const opsJson = JSON.stringify(b.ops);
+  if (opsJson.length > SUGGESTION_LIMIT) throw new HttpError(413, "پیشنهاد بیش از حد بزرگ است");
+  const res = await env.DB.prepare("UPDATE suggestions SET ops = ? WHERE id = ?").bind(opsJson, id).run();
+  if (!res.meta.changes) throw new HttpError(404, "پیشنهاد یافت نشد");
+  return json({ ok: true });
+};
+
+/** Admin: after applying or to reject. The suggester: to withdraw their own. */
+const deleteSuggestion: Handler = async ({ env, user, params }) => {
+  const me = require(user, "viewer");
+  const id = optId(params[0])!;
+  const res =
+    me.role === "admin"
+      ? await env.DB.prepare("DELETE FROM suggestions WHERE id = ?").bind(id).run()
+      : await env.DB.prepare("DELETE FROM suggestions WHERE id = ? AND user_id = ?").bind(id, me.id).run();
+  if (!res.meta.changes) throw new HttpError(404, "پیشنهاد یافت نشد");
+  return json({ ok: true });
+};
+
 const getTree: Handler = async ({ env, user }) => {
   const me = require(user, "viewer");
   const { list, marriages, clans, perms } = await loadScoped(env, me);
@@ -432,6 +497,8 @@ const getTree: Handler = async ({ env, user }) => {
     people,
     // who added and who last changed each person: admins only
     audit: me.role === "admin" ? await auditTrail(env) : undefined,
+    // suggestions waiting for review: admins see all, a suggester their own
+    suggestions: me.role === "admin" || me.suggester ? await suggestionCount(env, me) : undefined,
     marriages: marriages.filter((m) => canSee(perms, m.husband_id) && canSee(perms, m.wife_id)),
     clans: perms.all ? clans : clans.filter((c) => shownClans.has(c.id) || perms.addClans!.has(c.id) || perms.addClans!.has(null)),
     access: perms.all
@@ -909,7 +976,7 @@ const grantInsert = (env: Env, owner: "user_id" | "group_id", id: number, g: Gra
 const getAccess: Handler = async ({ env, user }) => {
   require(user, "admin");
   const [u, g, ug, gr] = await env.DB.batch([
-    env.DB.prepare("SELECT id, username, display_name, role FROM users ORDER BY id"),
+    env.DB.prepare("SELECT id, username, display_name, role, suggester FROM users ORDER BY id"),
     env.DB.prepare("SELECT id, name, description FROM access_groups ORDER BY name"),
     env.DB.prepare("SELECT user_id, group_id FROM user_groups"),
     env.DB.prepare("SELECT id, user_id, group_id, clan_id, root_id, level, max_gen FROM grants ORDER BY id"),
@@ -1098,6 +1165,10 @@ const routes: [string, RegExp, Handler][] = [
   ["POST", /^\/api\/marriages$/, createMarriage],
   ["PUT", /^\/api\/marriages\/(\d+)$/, updateMarriage],
   ["DELETE", /^\/api\/marriages\/(\d+)$/, deleteMarriage],
+  ["GET", /^\/api\/suggestions$/, listSuggestions],
+  ["POST", /^\/api\/suggestions$/, createSuggestion],
+  ["PUT", /^\/api\/suggestions\/(\d+)$/, updateSuggestion],
+  ["DELETE", /^\/api\/suggestions\/(\d+)$/, deleteSuggestion],
   ["GET", /^\/api\/export$/, exportData],
   ["POST", /^\/api\/import$/, importData],
 ];

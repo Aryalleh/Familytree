@@ -21,6 +21,8 @@ function esc(s) {
  */
 async function api(method, path, data) {
   const edit = method !== "GET" && editType(method, path);
+  // a suggester's edits are collected as a suggestion for an admin instead of being saved
+  if (edit && suggesting()) return editDraft(method, path, data);
   // while offline edits wait to be sent, new ones join the queue so they stay in order
   if (edit && (S.offline || local.ops(S.user?.id).length)) return editOffline(method, path, data);
   try {
@@ -67,6 +69,11 @@ async function apiFetch(method, path, data) {
 
 let toastTimer;
 function toast(msg, isError = false) {
+  // the "saved" message after a suggester's edit: it was only added to their suggestion
+  if (!isError && Date.now() - (S.draftAt || 0) < 3000) {
+    msg = "به پیشنهاد شما اضافه شد؛ برای فرستادن به مدیر «📝 پیشنهادها» را بزنید";
+    S.draftAt = 0;
+  }
   const t = $("#toast");
   t.textContent = msg;
   t.className = "show" + (isError ? " error" : "");
@@ -131,14 +138,17 @@ const S = {
 };
 
 /** May this user add or edit anything at all? */
-const canEdit = () => !!S.user && (permAll() || !!S.perm?.editable?.size || !!S.perm?.addClans?.size);
+const canEdit = () => !!S.user && (permAll() || suggesting() || !!S.perm?.editable?.size || !!S.perm?.addClans?.size);
 const isAdmin = () => S.user?.role === "admin";
+/** A suggester edits everything they can see, but only as a suggestion for an admin. */
+const suggesting = () => !!S.user?.suggester && !isAdmin();
+const roleFa = (u) => (u.role !== "admin" && u.suggester ? "پیشنهاددهنده" : ROLE_FA[u.role]);
 // What this user may do, as computed by the server (generations.js → permissions). People
 // created offline (temporary ids) count as editable until the server decides on replay.
 const permAll = () => isAdmin() || !!S.perm?.all;
-const canEditPerson = (id) => permAll() || !!S.perm?.editable?.has(id) || isTemp(id);
-const canDeletePerson = (id) => permAll() || !!S.perm?.deletable?.has(id) || isTemp(id);
-const canAddInClan = (clanId) => permAll() || !!S.perm?.addClans?.has(null) || !!S.perm?.addClans?.has(clanId);
+const canEditPerson = (id) => permAll() || suggesting() || !!S.perm?.editable?.has(id) || isTemp(id);
+const canDeletePerson = (id) => permAll() || suggesting() || !!S.perm?.deletable?.has(id) || isTemp(id);
+const canAddInClan = (clanId) => permAll() || suggesting() || !!S.perm?.addClans?.has(null) || !!S.perm?.addClans?.has(clanId);
 const ROLE_FA = { admin: "مدیر", editor: "ویرایشگر", viewer: "بیننده" };
 const STATUS_FA = { married: "متأهل", divorced: "جداشده", widowed: "فوت همسر" };
 
@@ -332,6 +342,7 @@ function renderMain() {
           <button class="nav-btn" data-act="finder" title="خویشاوندی"><span class="ico">🔗</span><span class="lbl">خویشاوندی</span></button>
           <button class="nav-btn" data-act="add" title="افزودن شخص" hidden><span class="ico">＋</span><span class="lbl">افزودن شخص</span></button>
           <button class="nav-btn" data-act="changes" title="آخرین تغییرات" ${isAdmin() ? "" : "hidden"}><span class="ico">🕘</span><span class="lbl">تغییرات</span></button>
+          <button class="nav-btn" data-act="suggest" title="پیشنهادها" ${isAdmin() || suggesting() ? "" : "hidden"}><span class="ico">${isAdmin() ? "📥" : "📝"}</span><span class="lbl">پیشنهادها</span><span class="net-chip suggest-chip" hidden></span></button>
           <button class="nav-btn" data-act="sync" title="آفلاین و همگام‌سازی"><span class="ico">☁️</span><span class="lbl">آفلاین</span><span class="net-chip" hidden></span></button>
           <button class="nav-btn" data-act="settings" title="تنظیمات"><span class="ico">🛠️</span><span class="lbl">تنظیمات</span></button>
           ${isAdmin() ? `<button class="nav-btn" data-act="users" title="مدیریت"><span class="ico">⚙️</span><span class="lbl">مدیریت</span></button>` : ""}
@@ -345,7 +356,7 @@ function renderMain() {
         <div class="user-menu">
           <button class="user-btn" data-act="account" title="حساب کاربری">
             <span class="user-avatar">${esc((u.display_name || u.username).charAt(0))}</span>
-            <span class="user-name">${esc(u.display_name || u.username)}<small>${ROLE_FA[u.role]}</small></span>
+            <span class="user-name">${esc(u.display_name || u.username)}<small>${roleFa(u)}</small></span>
           </button>
           <button class="btn ghost small" data-act="logout" title="خروج" ${DEMO ? "hidden" : ""}>⎋<span class="lbl"> خروج</span></button>
         </div>
@@ -396,7 +407,7 @@ function renderMain() {
   });
   window.addEventListener("afterprint", () => $("#print-root").replaceChildren());
   $("[data-act=logout]").addEventListener("click", async () => {
-    const pending = local.ops(S.user.id).length;
+    const pending = local.ops(S.user.id).length + local.draft(S.user.id).length;
     if (pending && !confirm(`${toFa(pending)} تغییرِ ارسال‌نشده دارید که با خروج از این دستگاه پاک می‌شود. ادامه می‌دهید؟`)) return;
     await api("POST", "/api/logout", {}).catch(() => {});
     local.clear(S.user.id);
@@ -404,6 +415,7 @@ function renderMain() {
     boot();
   });
   $("[data-act=sync]").addEventListener("click", () => openSync());
+  $("[data-act=suggest]").addEventListener("click", () => openSuggestions());
   if (DEMO) setupDeployCard();
   $("[data-act=demo-reset]")?.addEventListener("click", async () => {
     if (!confirm("همهٔ تغییرات شما در نسخهٔ نمایشی پاک شود و داده‌های نمونه برگردد؟")) return;
@@ -506,7 +518,12 @@ async function loadTree({ fit = false } = {}) {
       if (!data) throw new Error("نسخهٔ آفلاینی از شجره‌نامه روی این دستگاه نیست");
     }
     // edits not yet sent to the server are shown on top of the last known data
-    const merged = applyOps(data.people, data.marriages, local.ops(S.user.id));
+    const draft = local.draft(S.user.id);
+    const merged = applyOps(data.people, data.marriages, [...local.ops(S.user.id), ...draft]);
+    // people touched by a suggester's unsent suggestion are outlined on the tree
+    S.draftIds = new Set(draft.flatMap((o) => (o.type.endsWith("Person") ? [o.id] : [Number(o.data?.husband_id), Number(o.data?.wife_id)])));
+    S.suggestionCount = data.suggestions ?? 0;
+    updateSuggestChip();
     S.people = merged.people;
     S.marriages = merged.marriages;
     S.access = data.access || null;
@@ -705,7 +722,7 @@ function redraw(relayout = false) {
 
   const kin = new Set(S.selectedId != null && person(S.selectedId) ? familyIds(S.selectedId).slice(1) : []);
   const pr = prefs();
-  const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0, guests: S.guests, missingOf: (p) => missingLabel(missingChildren(S.fam, p)) };
+  const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0, guests: S.guests, draftIds: S.draftIds, missingOf: (p) => missingLabel(missingChildren(S.fam, p)) };
   S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation, gens: S.gens, siblingOrder: pr.siblingOrder });
   renderLegend();
 }
@@ -915,7 +932,7 @@ function renderPanel() {
     ${
       editor
         ? `<div class="actions"><button class="btn small" data-act="edit">✎ ویرایش</button>
-          ${S.clans.length > 1 ? `<button class="btn small" data-act="move">انتقال به طایفهٔ دیگر</button>` : ""}
+          ${S.clans.length > 1 && !suggesting() ? `<button class="btn small" data-act="move">انتقال به طایفهٔ دیگر</button>` : ""}
           ${canDeletePerson(p.id) ? `<button class="btn small danger" data-act="delete">حذف</button>` : ""}</div>`
         : ""
     }`;
@@ -947,8 +964,10 @@ function renderPanel() {
             ? `<div class="rel-pills"><span class="pill kind-self">★ مبنای نسبت‌ها («من»)</span></div>`
             : ""
       }
+      ${S.draftIds?.has(p.id) ? `<div class="hint draft-note">📝 تغییرات شما روی این شخص هنوز به مدیر فرستاده نشده است.</div>` : ""}
       <div class="actions">
         ${focus?.id === p.id ? `<button class="btn small" data-act="unfocus">برداشتن «من»</button>` : `<button class="btn small" data-act="focus">★ این شخص «من» است</button>`}
+        ${suggesting() ? `<button class="btn small" data-act="report">✉ گزارش اشتباه</button>` : ""}
       </div>
       <div class="ptabs" role="tablist">
         <button data-tab="info" class="${tab === "info" ? "active" : ""}">مشخصات</button>
@@ -1018,6 +1037,7 @@ function renderPanel() {
   $$("[data-add]", panel).forEach((b) => b.addEventListener("click", () => addRelative(p, b.dataset.add)));
   $$("[data-unnamed]", panel).forEach((b) => b.addEventListener("click", () => addUnnamedChild(p, b.dataset.unnamed, b)));
   $("[data-act=name]", panel)?.addEventListener("click", () => openNameForm(p));
+  $("[data-act=report]", panel)?.addEventListener("click", () => openSuggestions({ personId: p.id }));
 }
 
 /** "⚠ ۱ پسر و ۲ دختر هنوز ثبت نشده" under the children, with buttons to add them without a name. */
@@ -1649,7 +1669,7 @@ function openFinder() {
 function openAccount() {
   const { el, close } = modal({
     title: "حساب کاربری",
-    body: `<p>${esc(S.user.display_name)} — <span dir="ltr">${esc(S.user.username)}</span> <span class="role">${ROLE_FA[S.user.role]}</span></p>
+    body: `<p>${esc(S.user.display_name)} — <span dir="ltr">${esc(S.user.username)}</span> <span class="role">${roleFa(S.user)}</span></p>
       <p class="hint">دسترسی شما: ${
         permAll()
           ? "کامل"
@@ -1831,7 +1851,8 @@ async function openAdmin(tab = "users") {
               <td>${esc(u.display_name)}</td><td dir="ltr">${esc(u.username)}</td>
               <td><select class="input" data-role ${u.id === S.user.id ? "disabled" : ""}>
                 <option value="admin" ${u.role === "admin" ? "selected" : ""}>مدیر</option>
-                <option value="viewer" ${u.role !== "admin" ? "selected" : ""}>کاربر</option></select></td>
+                <option value="viewer" ${u.role !== "admin" && !u.suggester ? "selected" : ""}>کاربر</option>
+                <option value="suggester" ${u.role !== "admin" && u.suggester ? "selected" : ""}>پیشنهاددهنده</option></select></td>
               <td class="access-cell">${esc(summary)} ${u.role !== "admin" ? `<button class="btn small" data-access>تعیین</button>` : ""}</td>
               <td><button class="btn small" data-reset>رمز تازه</button> ${u.id !== S.user.id ? `<button class="btn small danger" data-del>حذف</button>` : ""}</td>
             </tr>`;
@@ -1843,11 +1864,12 @@ async function openAdmin(tab = "users") {
           <label class="field"><span>نام نمایشی</span><input class="input" name="display_name"></label>
           <label class="field"><span>نام کاربری</span><input class="input" name="username" dir="ltr"></label>
           <label class="field"><span>رمز عبور</span><input class="input" name="password" type="password" dir="ltr" autocomplete="new-password"></label>
-          <label class="field"><span>نقش</span><select class="input" name="role"><option value="viewer">کاربر</option><option value="admin">مدیر</option></select></label>
+          <label class="field"><span>نقش</span><select class="input" name="role"><option value="viewer">کاربر</option><option value="suggester">پیشنهاددهنده</option><option value="admin">مدیر</option></select></label>
         </form>
         <div class="error"></div>
         <button class="btn primary" data-create>ساخت کاربر و تعیین دسترسی</button>
-        <p class="hint">مدیر همه‌چیز را می‌بیند و ویرایش می‌کند. هر کاربر دیگر فقط به اندازهٔ دسترسی‌هایش (و گروه‌هایش) می‌بیند و ویرایش می‌کند.</p>
+        <p class="hint">مدیر همه‌چیز را می‌بیند و ویرایش می‌کند. هر کاربر دیگر فقط به اندازهٔ دسترسی‌هایش (و گروه‌هایش) می‌بیند و ویرایش می‌کند.
+          «پیشنهاددهنده» هر چه را می‌بیند می‌تواند اصلاح کند یا اشتباهی را گزارش دهد، ولی تغییراتش ذخیره نمی‌شود؛ به‌صورت پیشنهاد برای مدیر فرستاده می‌شود تا مدیر آن را اعمال یا رد کند.</p>
       </div>
       <div data-pane="groups" hidden>
         <p class="hint">دسترسی‌ها را دسته‌بندی کنید: مثلاً «ویرایشگران طایفهٔ رحیمی» یا «خانوادهٔ حسن — فقط دیدن»، و کاربران را عضو گروه‌ها کنید.</p>
@@ -2114,6 +2136,187 @@ function setupDeployCard() {
   show(false);
   // first visit: slide in once the visitor has had a look around
   if (!store.get("ft_deploy_seen")) setTimeout(() => card.hidden && show(true), 8000);
+}
+
+// ---------------------------------------------------------------------------
+// suggestions: a suggester's edits are kept as a draft, sent with a note, and an admin applies
+// them (replayed like offline edits, with the same conflict checks) or rejects them
+
+function editDraft(method, path, data) {
+  const base = local.snapshot(S.user.id);
+  if (!base) throw new Error("شجره‌نامه هنوز بارگذاری نشده است");
+  const { ops, response } = queueEdit(local.draft(S.user.id), base, method, path, data);
+  if (!local.setDraft(S.user.id, ops)) throw new Error("حافظهٔ مرورگر پر است؛ پیشنهاد فعلی را بفرستید");
+  S.draftAt = Date.now();
+  updateSuggestChip();
+  return response;
+}
+
+function updateSuggestChip() {
+  const chip = $(".suggest-chip");
+  if (!chip || !S.user) return;
+  const n = isAdmin() ? S.suggestionCount || 0 : local.draft(S.user.id).length;
+  chip.hidden = !n;
+  chip.textContent = toFa(n);
+}
+
+/** What one edit changes, field by field, against the records it started from. */
+function opDetails(op, base) {
+  const nameOf = (id) => {
+    const p = base.people.get(Number(id));
+    return p ? lineageName(p, 1) : isTemp(Number(id)) ? "(شخص تازهٔ همین پیشنهاد)" : `#${id}`;
+  };
+  const show = (f, v) => (["father_id", "mother_id", "husband_id", "wife_id"].includes(f) ? (v ? nameOf(v) : "—") : f === "clan_id" ? (v ? clanName(Number(v)) : "—") : showValue(f, v));
+  const fields = (data, old) =>
+    Object.entries(data || {})
+      .filter(([f, v]) => FIELD_FA[f] && (old ? !sameValue(v, old[f]) : v !== "" && v != null && v !== false))
+      .map(([f, v]) => `<li><b>${FIELD_FA[f]}:</b> ${old ? `<s>${esc(show(f, old[f]))}</s> ← ` : ""}${esc(show(f, v))}</li>`)
+      .join("");
+  const rec = op.type.endsWith("Person") ? base.people.get(op.id) : base.marriages.get(op.id);
+  const title = describeOp(op, (id) => (base.people.get(Number(id)) ? fullName(base.people.get(Number(id))) : ""));
+  const where = op.type === "updatePerson" || op.type === "deletePerson" ? ` <span class="muted small">(${esc(rec ? lineageName(rec, 2) : "شخصی که دیگر نیست")})</span>` : "";
+  const list = op.type.startsWith("create") ? fields(op.data) : op.type.startsWith("update") ? fields(op.data, rec || {}) : "";
+  return `<li><div>${esc(title)}${where}</div>${list ? `<ul class="op-fields">${list}</ul>` : ""}</li>`;
+}
+
+const asBase = (people, marriages) => ({ people: new Map(people.map((p) => [p.id, p])), marriages: new Map(marriages.map((m) => [m.id, m])) });
+
+async function openSuggestions({ personId = null } = {}) {
+  if (isAdmin()) return openReview();
+  const draft = local.draft(S.user.id);
+  const snap = local.snapshot(S.user.id) || { people: [], marriages: [] };
+  const base = asBase(snap.people, snap.marriages);
+  const target = personId ? person(personId) : null;
+  let mine = [];
+  try {
+    mine = (await api("GET", "/api/suggestions")).suggestions;
+  } catch (e) {
+    if (!(e instanceof OfflineError)) toast(e.message, true);
+  }
+  const { el, close } = modal({
+    title: "پیشنهاد به مدیر",
+    wide: true,
+    body: `
+      <p class="hint">تغییراتی که در شجره‌نامه می‌دهید ذخیره نمی‌شوند؛ این‌جا جمع می‌شوند تا با یک توضیح برای مدیر بفرستید. مدیر بررسی می‌کند و اگر درست بود به شجره‌نامه اضافه می‌کند.</p>
+      <div class="section-title">تغییرات شما (${toFa(draft.length)})</div>
+      ${draft.length ? `<ol class="ops">${draft.map((o) => opDetails(o, base)).join("")}</ol>` : `<p class="muted">هنوز تغییری نداده‌اید. می‌توانید مثل همیشه افراد را ویرایش یا اضافه کنید، یا فقط اشتباه را در توضیح بنویسید.</p>`}
+      <label class="field"><span>توضیح برای مدیر${target ? ` (دربارهٔ ${esc(lineageName(target, 2))})` : ""}</span>
+        <textarea class="input" name="message" rows="4" placeholder="مثلاً: سال تولد فلانی اشتباه است؛ درستش ۱۳۲۰ است.">${target ? esc(`دربارهٔ ${lineageName(target, 2)}: `) : ""}</textarea></label>
+      <div class="error"></div>
+      <div class="actions">
+        <button class="btn primary" data-send>✉ فرستادن برای مدیر</button>
+        <button class="btn danger" data-drop ${draft.length ? "" : "disabled"}>دور ریختن تغییرات</button>
+      </div>
+      ${
+        mine.length
+          ? `<div class="section-title">پیشنهادهای فرستاده‌شده در انتظار بررسی (${toFa(mine.length)})</div>
+        <div class="suggestions">${mine.map((x) => `<div class="suggestion" data-sid="${x.id}"><div class="muted small">${when(x.created_at)}</div>${x.message ? `<div class="notes">${esc(x.message)}</div>` : ""}${x.ops.length ? `<div class="muted small">${toFa(x.ops.length)} تغییر</div>` : ""}<button class="btn small" data-withdraw>پس گرفتن</button></div>`).join("")}</div>`
+          : ""
+      }`,
+  });
+  const msg = $("[name=message]", el);
+  msg.focus();
+  msg.setSelectionRange(msg.value.length, msg.value.length);
+  $("[data-drop]", el).addEventListener("click", async () => {
+    if (!confirm("تغییرات پیشنهادی پاک شوند؟")) return;
+    local.setDraft(S.user.id, []);
+    close();
+    await loadTree();
+  });
+  $("[data-send]", el).addEventListener("click", async (e) => {
+    const message = msg.value.trim();
+    const typed = target ? message !== `دربارهٔ ${lineageName(target, 2)}:` : !!message;
+    if (!draft.length && !typed) return ($(".error", el).textContent = "توضیح بدهید چه چیزی اشتباه است، یا اول تغییری در شجره‌نامه بدهید");
+    e.target.disabled = true;
+    try {
+      await apiFetch("POST", "/api/suggestions", { message, ops: draft, person_id: personId });
+      local.setDraft(S.user.id, []);
+      close();
+      toast("پیشنهاد برای مدیر فرستاده شد؛ ممنون!");
+      await loadTree();
+    } catch (ex) {
+      $(".error", el).textContent = ex instanceof OfflineError ? "اتصال برقرار نیست؛ پیشنهاد روی همین دستگاه می‌ماند تا بعداً بفرستید" : ex.message;
+      e.target.disabled = false;
+    }
+  });
+  $$("[data-withdraw]", el).forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm("این پیشنهاد پس گرفته شود؟")) return;
+      try {
+        await apiFetch("DELETE", `/api/suggestions/${b.closest("[data-sid]").dataset.sid}`);
+        b.closest(".suggestion").remove();
+      } catch (ex) {
+        toast(ex.message, true);
+      }
+    }),
+  );
+}
+
+/** Admin: the suggestions waiting for review — apply to the tree, or reject. */
+async function openReview() {
+  let list;
+  try {
+    list = (await api("GET", "/api/suggestions")).suggestions;
+  } catch (e) {
+    return toast(e.message, true);
+  }
+  const base = asBase(S.people, S.marriages);
+  const { el, close } = modal({
+    title: "پیشنهادهای کاربران",
+    wide: true,
+    body: list.length
+      ? `<p class="hint">«اعمال» تغییرات را به ترتیب در شجره‌نامه ثبت می‌کند؛ اگر کسی در این فاصله همان فیلد را عوض کرده باشد، از شما پرسیده می‌شود کدام بماند. «رد» پیشنهاد را بدون تغییر شجره‌نامه پاک می‌کند. پس از اعمال یا رد، پیشنهاد از سرور حذف می‌شود.</p>
+        <div class="suggestions">${list
+          .map(
+            (x) => `<div class="suggestion" data-sid="${x.id}">
+          <div class="suggestion-head"><b>${esc(x.user_name || x.username)}</b> <span class="muted small">${when(x.created_at)}</span>
+            ${x.person_id && person(x.person_id) ? `<button class="btn ghost small" data-goto="${x.person_id}">${esc(lineageName(person(x.person_id), 1))}</button>` : ""}</div>
+          ${x.message ? `<div class="notes">${esc(x.message)}</div>` : ""}
+          ${x.ops.length ? `<ol class="ops">${x.ops.map((o) => opDetails(o, base)).join("")}</ol>` : ""}
+          <div class="actions">
+            ${x.ops.length ? `<button class="btn primary small" data-apply>✓ اعمال در شجره‌نامه</button>` : `<button class="btn primary small" data-done>✓ بررسی شد</button>`}
+            <button class="btn danger small" data-reject>✕ رد و حذف</button>
+          </div>
+        </div>`,
+          )
+          .join("")}</div>`
+      : `<p class="muted">پیشنهادی در انتظار بررسی نیست.</p>`,
+  });
+  const remove = async (box) => {
+    await apiFetch("DELETE", `/api/suggestions/${box.dataset.sid}`);
+    box.remove();
+    S.suggestionCount = Math.max(0, (S.suggestionCount || 1) - 1);
+    updateSuggestChip();
+    if (!$(".suggestion", el)) close();
+  };
+  $$("[data-goto]", el).forEach((b) => b.addEventListener("click", () => (close(), selectPerson(Number(b.dataset.goto)))));
+  $$(".suggestion", el).forEach((box) => {
+    const x = list.find((s) => String(s.id) === box.dataset.sid);
+    $("[data-reject]", box).addEventListener("click", async () => {
+      if (!confirm("این پیشنهاد رد و پاک شود؟")) return;
+      await remove(box).then(() => toast("پیشنهاد رد شد"), (e) => toast(e.message, true));
+    });
+    $("[data-done]", box)?.addEventListener("click", () => remove(box).then(() => toast("بایگانی شد"), (e) => toast(e.message, true)));
+    $("[data-apply]", box)?.addEventListener("click", async (e) => {
+      e.target.disabled = true;
+      try {
+        const res = await syncLoop(x.ops);
+        await loadTree();
+        if (res.postponed || res.remaining.length) {
+          x.ops = res.remaining;
+          await apiFetch("PUT", `/api/suggestions/${x.id}`, { ops: x.ops });
+          toast(`${toFa(res.done)} تغییر ثبت شد؛ بقیه ماند تا دوباره بررسی کنید`, true);
+          e.target.disabled = false;
+          return;
+        }
+        await remove(box);
+        toast(`پیشنهاد اعمال شد (${toFa(res.done)} تغییر)`);
+      } catch (ex) {
+        toast(ex.message, true);
+        e.target.disabled = false;
+      }
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

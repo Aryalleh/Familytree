@@ -1128,5 +1128,51 @@
    "status": "married",
    "marriage_date": "۱۳۶۰"
   }
+ ],
+ "suggestions": [
+  {
+   "id": 1,
+   "user_name": "مریم (پیشنهاددهنده)",
+   "username": "maryam",
+   "person_id": 1,
+   "created_at": "2026-10-20 18:30:00",
+   "message": "علی‌محمد رحیمی دختر دیگری هم داشت به نام «فاطمه» که در کودکی فوت شد؛ پدربزرگم تعریف می‌کرد. محل تولد حسن رحیمی هم کاشان بوده.",
+   "ops": [
+    {
+     "type": "createPerson",
+     "id": 1000000000,
+     "at": "2026-10-20T18:28:00Z",
+     "data": {
+      "first_name": "فاطمه",
+      "last_name": "رحیمی",
+      "gender": "female",
+      "father_id": 1,
+      "mother_id": 8,
+      "clan_id": 1,
+      "birth_order": 5,
+      "is_deceased": true,
+      "notes": "در کودکی درگذشت."
+     }
+    },
+    {
+     "type": "updatePerson",
+     "id": 11,
+     "base_version": 1,
+     "at": "2026-10-20T18:29:00Z",
+     "data": {
+      "birth_place": "کاشان"
+     }
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "user_name": "رضا (پیشنهاددهنده)",
+   "username": "reza",
+   "person_id": 13,
+   "created_at": "2026-10-21 09:10:00",
+   "message": "به نظرم سال وفات محمود رحیمی ۱۲۷۵ نیست؛ لطفاً با سند فوت چک شود.",
+   "ops": []
+  }
  ]
 }

@@ -624,6 +624,7 @@ export function drawLayout(root, L, state = {}, on = {}) {
       copy ? "copy" : "",
       state.guests?.has(p.id) ? "guest" : "",
       p.is_deceased ? "deceased" : "",
+      state.draftIds?.has(p.id) ? "draft" : "",
       p.id === state.selectedId ? "selected" : "",
       kin.has(p.id) ? "kin" : "",
       p.id === state.focusId ? "focus" : "",

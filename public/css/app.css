@@ -1805,3 +1805,40 @@ label.btn.disabled {
 .missing-box .add-pair {
   margin-top: 8px;
 }
+
+/* suggestions */
+.card.draft .card-bg {
+  stroke: var(--k-inlaw);
+  stroke-width: 2.5;
+  stroke-dasharray: 6 3;
+}
+.draft-note {
+  color: var(--k-inlaw);
+}
+.suggestions {
+  display: grid;
+  gap: 12px;
+}
+.suggestion {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+}
+.suggestion-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.suggestion .notes {
+  margin: 6px 0;
+}
+.ops .op-fields {
+  margin: 4px 0 6px;
+  padding-inline-start: 18px;
+  font-size: 13px;
+}
+.ops .op-fields s {
+  color: var(--muted);
+}

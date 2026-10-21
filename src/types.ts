@@ -10,6 +10,8 @@ export interface User {
   username: string;
   display_name: string;
   role: Role;
+  /** may send suggested changes for an admin to review (instead of editing) */
+  suggester?: number;
   prefs?: string;
 }
 

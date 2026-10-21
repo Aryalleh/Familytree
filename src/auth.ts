@@ -88,7 +88,7 @@ export async function currentUser(env: Env, request: Request): Promise<User | nu
   const token = readSessionToken(request);
   if (!token) return null;
   const row = await env.DB.prepare(
-    `SELECT u.id, u.username, u.display_name, u.role, u.prefs FROM sessions s
+    `SELECT u.id, u.username, u.display_name, u.role, u.suggester, u.prefs FROM sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND s.expires_at > ?`,
   )

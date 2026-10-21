@@ -35,10 +35,14 @@ export const local = {
   setSnapshot: (uid, data) => write(`ft_snapshot_${uid}`, data),
   ops: (uid) => read(`ft_ops_${uid}`, []),
   setOps: (uid, ops) => write(`ft_ops_${uid}`, ops),
+  /** a suggester's edits, kept until sent to an admin as a suggestion */
+  draft: (uid) => read(`ft_draft_${uid}`, []),
+  setDraft: (uid, ops) => write(`ft_draft_${uid}`, ops),
   clear(uid) {
     write("ft_last_user", null);
     write(`ft_snapshot_${uid}`, null);
     write(`ft_ops_${uid}`, null);
+    write(`ft_draft_${uid}`, null);
   },
 };
 
