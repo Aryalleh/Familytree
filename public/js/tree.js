@@ -296,6 +296,62 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
     out.push(r);
   }
 
+  // A block with two parent families (both spouses' parents are in the tree): with dagre, the
+  // nearer family gets the usual bus; the other is joined with a curve, so its line doesn't run
+  // along another family's sibling bus and look like the couple are siblings.
+  const mainParent = new Map();
+  if (!primary) {
+    const best = new Map();
+    for (const u of out) {
+      const src = blockOf.get(u.h ?? u.single);
+      for (const c of u.children) {
+        const dst = blockOf.get(c);
+        if (!inSet.has(dst) || dst === src || !inSet.has(src)) continue;
+        const d = Math.abs(u.du - ap.get(c).u);
+        const cur = best.get(dst);
+        if (!cur) best.set(dst, { src, d, n: 1 });
+        else best.set(dst, cur.src === src ? cur : { ...(d < cur.d ? { src, d } : cur), n: cur.n + 1 });
+      }
+    }
+    for (const [dst, b] of best) if (b.n > 1) mainParent.set(dst, b.src);
+  }
+
+  const isLong = (u, src, dst, c) => {
+    const top = ap.get(c).v - cM / 2;
+    const rowEnd = node.get(src.key).y + cM / 2;
+    const cross = primary ? !primary.has(`${src.key}>${dst.key}`) : mainParent.has(dst) && mainParent.get(dst) !== src;
+    return cross || top - rowEnd > RANK_SEP + 8;
+  };
+
+  // Sibling buses of different families between the same two rows may overlap; each family whose
+  // bus overlaps another's gets its own height (lane), so the lines don't read as one family.
+  const lane = new Map();
+  {
+    const groups = new Map();
+    for (const u of out) {
+      const src = blockOf.get(u.h ?? u.single);
+      const xs = u.children.filter((c) => {
+        const dst = blockOf.get(c);
+        return inSet.has(dst) && dst !== src && !isLong(u, src, dst, c);
+      }).map((c) => ap.get(c).u);
+      if (!xs.length) continue;
+      const rowEnd = Math.round(node.get(src.key).y + cM / 2);
+      if (!groups.has(rowEnd)) groups.set(rowEnd, []);
+      groups.get(rowEnd).push({ u, a: Math.min(u.du, ...xs), b: Math.max(u.du, ...xs) });
+    }
+    for (const list of groups.values()) {
+      list.sort((x, y) => x.a - y.a);
+      const ends = [];
+      for (const it of list) {
+        let k = ends.findIndex((e) => e < it.a - 6);
+        if (k < 0) k = ends.push(-Infinity) - 1;
+        ends[k] = it.b;
+        it.k = k;
+      }
+      for (const it of list) lane.set(it.u.key, { k: it.k, n: ends.length });
+    }
+  }
+
   // connectors to children
   const links = [];
   for (const u of out) {
@@ -307,11 +363,11 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
       const p = ap.get(c);
       const top = p.v - cM / 2;
       // a second parent family in the birth layout (e.g. a cousin marriage) is joined with a curve
-      const cross = primary && !primary.has(`${src.key}>${dst.key}`);
-      const long = cross || top - rowEnd > RANK_SEP + 8;
+      const long = isLong(u, src, dst, c);
       let cmds;
       if (!long) {
-        const bus = rowEnd + (top - rowEnd) / 2;
+        const ln = lane.get(u.key) || { k: 0, n: 1 };
+        const bus = rowEnd + ((top - rowEnd) * (ln.k + 1)) / (ln.n + 1);
         cmds = [["M", [u.du, u.dv]], ["L", [u.du, bus]], ["L", [p.u, bus]], ["L", [p.u, top]]];
       } else {
         const mids = (edgePoints(src.key, dst.key, `${u.key}>${c}`) || []).slice(1, -1).map((q) => [q.x, q.y]);
