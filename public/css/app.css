@@ -1853,3 +1853,14 @@ label.btn.disabled {
   font-size: 10.5px;
   font-weight: 700;
 }
+
+/* update */
+pre.code {
+  background: color-mix(in srgb, var(--muted) 10%, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 13px;
+  overflow-x: auto;
+}

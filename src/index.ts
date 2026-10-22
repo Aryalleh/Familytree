@@ -13,6 +13,7 @@ import { HttpError, type Env, type Marriage, type Person, type Role, type User }
 // shared with the browser, so both sides agree on generations and branches
 import { canAddInClan, permissions } from "../public/js/generations.js";
 import { baselineStmts, historyStmt, merge, recordAt, same, type Entity } from "./versions";
+import { commitUpdate, compareVersions, copyBlobs, current, github, latestRelease, parseRepo, updatePlan } from "./update";
 
 type Ctx = { env: Env; request: Request; url: URL; user: User | null; params: string[] };
 type Handler = (ctx: Ctx) => Promise<Response>;
@@ -87,6 +88,7 @@ const status: Handler = async ({ env, user }) => {
     setupRequired: (count?.n ?? 0) === 0,
     allowRegistration: await registrationOpen(env),
     user,
+    version: current.version,
   });
 };
 
@@ -479,6 +481,50 @@ const deleteSuggestion: Handler = async ({ env, user, params }) => {
       : await env.DB.prepare("DELETE FROM suggestions WHERE id = ? AND user_id = ?").bind(id, me.id).run();
   if (!res.meta.changes) throw new HttpError(404, "پیشنهاد یافت نشد");
   return json({ ok: true });
+};
+
+// ---------------------------------------------------------------------------
+// updates (admin): see src/update.ts
+
+const updateInfo: Handler = async ({ env, user, url }) => {
+  require(user, "admin");
+  const latest = await latestRelease(url.searchParams.has("fresh"));
+  return json({
+    current,
+    latest,
+    available: !!latest && compareVersions(latest.version, current.version) > 0,
+    repo: (await setting(env, "update_repo")) || "",
+  });
+};
+
+const updateStart: Handler = async ({ env, request, user }) => {
+  require(user, "admin");
+  const b = await body(request);
+  const repo = parseRepo(b.repo);
+  const plan = await updatePlan(github(String(b.token ?? "")), repo);
+  await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('update_repo', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(repo).run();
+  return json({ plan, latest: await latestRelease() });
+};
+
+const updateBlobs: Handler = async ({ request, user }) => {
+  require(user, "admin");
+  const b = await body(request);
+  const shas = Array.isArray(b.shas) ? (b.shas as unknown[]).map(String) : [];
+  // GitHub calls count towards the Worker's subrequest limit, so the browser sends small batches
+  if (shas.length > 12) throw new HttpError(400, "حداکثر ۱۲ فایل در هر مرحله");
+  await copyBlobs(github(String(b.token ?? "")), parseRepo(b.repo), shas);
+  return json({ ok: true });
+};
+
+const updateCommit: Handler = async ({ request, user }) => {
+  require(user, "admin");
+  const b = await body(request);
+  const plan = b.plan as { branch: string; base: string; files: { path: string; mode: string; sha: string }[] };
+  if (!plan || typeof plan.branch !== "string" || !/^[0-9a-f]{40}$/.test(plan.base) || !Array.isArray(plan.files)) throw new HttpError(400, "برنامهٔ به‌روزرسانی نامعتبر است");
+  const files = plan.files.map((f) => ({ path: String(f.path), mode: /^100(644|755)$/.test(String(f.mode)) ? String(f.mode) : "100644", sha: String(f.sha) }));
+  if (files.some((f) => !/^[0-9a-f]{40}$/.test(f.sha) || f.path.startsWith("/") || f.path.includes(".."))) throw new HttpError(400, "برنامهٔ به‌روزرسانی نامعتبر است");
+  const commit = await commitUpdate(github(String(b.token ?? "")), parseRepo(b.repo), { branch: plan.branch, base: plan.base, files }, String(b.version ?? "").slice(0, 20));
+  return json({ commit });
 };
 
 const getTree: Handler = async ({ env, user }) => {
@@ -1169,6 +1215,10 @@ const routes: [string, RegExp, Handler][] = [
   ["POST", /^\/api\/suggestions$/, createSuggestion],
   ["PUT", /^\/api\/suggestions\/(\d+)$/, updateSuggestion],
   ["DELETE", /^\/api\/suggestions\/(\d+)$/, deleteSuggestion],
+  ["GET", /^\/api\/update$/, updateInfo],
+  ["POST", /^\/api\/update\/start$/, updateStart],
+  ["POST", /^\/api\/update\/blobs$/, updateBlobs],
+  ["POST", /^\/api\/update\/commit$/, updateCommit],
   ["GET", /^\/api\/export$/, exportData],
   ["POST", /^\/api\/import$/, importData],
 ];

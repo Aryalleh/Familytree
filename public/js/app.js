@@ -331,7 +331,7 @@ function renderMain() {
               <button class="btn small primary" data-act="deploy-own">🌳 ساخت شجره‌نامهٔ خودم</button>
               <button class="btn small" data-act="demo-reset">شروع دوباره</button>
               <a href="https://github.com/Aryalleh/Familytree" target="_blank" rel="noopener">کد در گیت‌هاب</a></div>`
-          : "<div></div>"
+          : `<div class="top-slot"></div>`
       }
       <header class="topbar">
         <div class="brand"><span class="brand-logo">🌳</span><span class="brand-name">شجره‌نامه خاندان</span></div>
@@ -434,6 +434,7 @@ function renderMain() {
   });
   // offline edits still waiting from an earlier session go out as soon as the tree is loaded
   loadTree({ fit: true }).then(() => autoSync());
+  if (isAdmin() && !DEMO) setTimeout(() => checkUpdate(), 1500);
 }
 
 /** Parts of the canvas covered by floating UI, so "centre" means the visible centre. */
@@ -1836,7 +1837,7 @@ async function openAdmin(tab = "users") {
     body: `
       <div class="tabs">
         <button data-tab="users">کاربران</button><button data-tab="groups">گروه‌های دسترسی</button>
-        <button data-tab="clans">طایفه‌ها</button><button data-tab="backup">پشتیبان‌گیری</button>
+        <button data-tab="clans">طایفه‌ها</button><button data-tab="backup">پشتیبان‌گیری</button><button data-tab="update">به‌روزرسانی</button>
       </div>
       <div data-pane="users">
         <label class="check"><input type="checkbox" name="allow_registration" ${data.allowRegistration ? "checked" : ""}> ثبت‌نام عمومی آزاد باشد (کاربر تازه تا وقتی دسترسی نگیرد چیزی نمی‌بیند)</label>
@@ -1895,6 +1896,7 @@ async function openAdmin(tab = "users") {
         </tbody></table></div>
         <div class="actions"><input class="input" data-new-clan placeholder="نام طایفهٔ تازه" style="max-width:260px"><button class="btn primary" data-add-clan>＋ افزودن طایفه</button></div>
       </div>
+      <div data-pane="update" hidden><p class="muted">در حال بررسی…</p></div>
       <div data-pane="backup" hidden>
         <p>از کل شجره‌نامه (طایفه‌ها، اشخاص و ازدواج‌ها) فایل JSON بگیرید یا آن را بازیابی کنید.</p>
         <div class="actions">
@@ -1907,6 +1909,10 @@ async function openAdmin(tab = "users") {
   const showTab = (t) => {
     $$("[data-tab]", el).forEach((x) => x.classList.toggle("active", x.dataset.tab === t));
     $$("[data-pane]", el).forEach((x) => (x.hidden = x.dataset.pane !== t));
+    if (t === "update" && !$("[data-pane=update]", el).dataset.loaded) {
+      $("[data-pane=update]", el).dataset.loaded = "1";
+      fillUpdatePane($("[data-pane=update]", el), { fresh: true });
+    }
   };
   showTab(tab);
   $$("[data-tab]", el).forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
@@ -2318,6 +2324,134 @@ async function openReview() {
       }
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// updates: a notice when a newer version is published on GitHub, and an in-app update for
+// installs made with the Deploy to Cloudflare button (see src/update.ts)
+
+async function checkUpdate() {
+  let info;
+  try {
+    info = await apiFetch("GET", "/api/update");
+  } catch {
+    return; // offline, or GitHub unreachable: try again next time
+  }
+  if (!info.available || store.get(`ft_update_later_${info.latest.version}`)) return;
+  const slot = $(".top-slot");
+  if (!slot) return;
+  slot.className = "demo-banner update-banner";
+  slot.innerHTML = `🎉 نسخهٔ تازهٔ شجره‌نامه (${esc(toFa(info.latest.version))}) منتشر شده است؛ نسخهٔ شما ${esc(toFa(info.current.version))} است.
+    <button class="btn small primary" data-act="update">مشاهده و به‌روزرسانی</button>
+    <button class="btn small" data-act="update-later">بعداً</button>`;
+  $("[data-act=update]", slot).addEventListener("click", () => openUpdate());
+  $("[data-act=update-later]", slot).addEventListener("click", () => {
+    store.set(`ft_update_later_${info.latest.version}`, "1");
+    slot.className = "top-slot";
+    slot.replaceChildren();
+  });
+}
+
+function openUpdate() {
+  const { el } = modal({ title: "به‌روزرسانی برنامه", wide: true, body: `<div data-update><p class="muted">در حال بررسی…</p></div>` });
+  fillUpdatePane($("[data-update]", el), { fresh: false });
+}
+
+async function fillUpdatePane(box, { fresh }) {
+  let info;
+  try {
+    info = await apiFetch("GET", `/api/update${fresh ? "?fresh" : ""}`);
+  } catch (e) {
+    box.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+    return;
+  }
+  const { current, latest, available } = info;
+  const changes = latest?.changes?.length ? `<ul>${latest.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : "";
+  box.innerHTML = `
+    <dl class="facts">
+      <dt>نسخهٔ شما</dt><dd>${esc(toFa(current.version))}${current.date ? ` <span class="muted small">(${esc(toFa(current.date))})</span>` : ""}</dd>
+      <dt>آخرین نسخه</dt><dd>${latest ? `${esc(toFa(latest.version))}${latest.date ? ` <span class="muted small">(${esc(toFa(latest.date))})</span>` : ""}` : `<span class="muted">GitHub در دسترس نیست</span>`}</dd>
+    </dl>
+    ${
+      !available
+        ? `<p>✅ برنامهٔ شما به‌روز است.</p>`
+        : `${changes ? `<div class="section-title">تازه‌های نسخهٔ ${esc(toFa(latest.version))}</div>${changes}` : ""}
+    <div class="section-title">به‌روزرسانی خودکار</div>
+    <p class="hint">اگر برنامه را با دکمهٔ «Deploy to Cloudflare» نصب کرده‌اید، یک نسخه از پروژه در GitHub شما ساخته شده و Cloudflare هر تغییرِ آن را خودکار منتشر می‌کند. این‌جا فایل‌های نسخهٔ تازه در همان مخزن ثبت می‌شوند؛ چند دقیقه بعد Cloudflare برنامه و دیتابیس را به‌روز می‌کند. داده‌های شجره‌نامه دست نمی‌خورند.</p>
+    <form data-uf class="row" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+      <label class="field"><span>مخزن GitHub شما (owner/repo)</span><input class="input" name="repo" dir="ltr" placeholder="your-name/familytree" value="${esc(info.repo)}"></label>
+      <label class="field"><span>توکن GitHub</span><input class="input" name="token" type="password" dir="ltr" autocomplete="off" placeholder="github_pat_…"></label>
+    </form>
+    <details class="hint"><summary>توکن را چطور بسازم؟</summary>
+      <ol>
+        <li>در GitHub به <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">Settings ← Developer settings ← Fine-grained tokens ← Generate new token</a> بروید.</li>
+        <li>در «Repository access» گزینهٔ «Only select repositories» و مخزنِ شجره‌نامهٔ خودتان را انتخاب کنید.</li>
+        <li>در «Permissions ← Repository permissions» بخش «Contents» را روی «Read and write» بگذارید.</li>
+        <li>توکن را بسازید و این‌جا بچسبانید. توکن جایی ذخیره نمی‌شود و فقط برای همین به‌روزرسانی به GitHub فرستاده می‌شود؛ بعد از آن می‌توانید در GitHub پاکش کنید.</li>
+      </ol>
+    </details>
+    <p class="hint">اگر خودتان در کد برنامه تغییری داده‌اید، فایل‌هایی که در نسخهٔ تازه عوض شده‌اند جایگزین می‌شوند (تنظیمات wrangler.toml شما حفظ می‌شود).</p>
+    <div class="error"></div>
+    <div class="actions"><button class="btn primary" data-go>⬆ به‌روزرسانی به نسخهٔ ${esc(toFa(latest.version))}</button></div>
+    <div data-progress></div>
+    <div class="section-title">نصب دستی</div>
+    <p class="hint">اگر برنامه را خودتان با دستور <code>npm run deploy</code> منتشر کرده‌اید، در پوشهٔ پروژه اجرا کنید:</p>
+    <pre dir="ltr" class="code">git pull\nnpm install\nnpm run deploy</pre>`
+    }
+    <p class="hint"><a href="${REPO_URL}" target="_blank" rel="noopener">صفحهٔ پروژه در GitHub</a></p>`;
+  $("[data-go]", box)?.addEventListener("click", (e) => runUpdate(box, latest.version, e.target));
+}
+
+async function runUpdate(box, version, btn) {
+  const form = $("[data-uf]", box);
+  const repo = form.repo.value.trim();
+  const token = form.token.value.trim();
+  const err = $(".error", box);
+  const progress = $("[data-progress]", box);
+  err.textContent = "";
+  if (!repo || !token) return (err.textContent = "نام مخزن و توکن را وارد کنید");
+  const say = (html) => (progress.innerHTML = `<div class="result-box">${html}</div>`);
+  btn.disabled = true;
+  try {
+    say("در حال مقایسهٔ مخزن شما با نسخهٔ تازه…");
+    const { plan } = await apiFetch("POST", "/api/update/start", { repo, token });
+    const shas = [...new Set(plan.files.map((f) => f.sha))];
+    for (let i = 0; i < shas.length; i += 10) {
+      say(`در حال فرستادن فایل‌ها: ${toFa(Math.min(i + 10, shas.length))} از ${toFa(shas.length)}…`);
+      await apiFetch("POST", "/api/update/blobs", { repo, token, shas: shas.slice(i, i + 10) });
+    }
+    say("در حال ثبت تغییرات در مخزن…");
+    const { commit } = await apiFetch("POST", "/api/update/commit", { repo, token, plan, version });
+    form.token.value = "";
+    say(
+      commit
+        ? `✅ نسخهٔ تازه در <a href="${esc(commit)}" target="_blank" rel="noopener">مخزن شما</a> ثبت شد. Cloudflare حالا برنامه را می‌سازد و منتشر می‌کند (معمولاً ۱ تا ۳ دقیقه). <span data-wait>منتظر انتشار…</span>`
+        : `مخزن شما همین حالا هم فایل‌های نسخهٔ تازه را دارد. اگر برنامه هنوز قدیمی است، در داشبورد Cloudflare بخش Workers ← این برنامه ← Deployments را بررسی کنید. <span data-wait>منتظر انتشار…</span>`,
+    );
+    waitForVersion(version, $("[data-wait]", progress));
+  } catch (e) {
+    progress.replaceChildren();
+    err.textContent = e.message;
+    btn.disabled = false;
+  }
+}
+
+/** Poll until the new version answers, then offer to reload. */
+async function waitForVersion(version, label, tries = 40) {
+  for (let i = 0; i < tries; i++) {
+    await new Promise((r) => setTimeout(r, 15000));
+    try {
+      const st = await apiFetch("GET", "/api/status");
+      if (st.version === version) {
+        label.innerHTML = `<b>منتشر شد!</b> <button class="btn small primary" data-reload>بارگذاری دوبارهٔ صفحه</button>`;
+        $("[data-reload]", label).addEventListener("click", () => location.reload());
+        return;
+      }
+    } catch {
+      // keep waiting
+    }
+  }
+  label.textContent = "انتشار بیشتر از معمول طول کشید؛ وضعیت ساخت را در داشبورد Cloudflare (Workers ← این برنامه ← Deployments) ببینید.";
 }
 
 // ---------------------------------------------------------------------------
