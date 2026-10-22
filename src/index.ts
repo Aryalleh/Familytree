@@ -486,6 +486,18 @@ const deleteSuggestion: Handler = async ({ env, user, params }) => {
 // ---------------------------------------------------------------------------
 // updates (admin): see src/update.ts
 
+async function putSetting(env: Env, key: string, value: string) {
+  await env.DB.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(key, value).run();
+}
+
+/** The repository and token saved with «اتصال به GitHub», or ones sent with this request. */
+async function updateTarget(env: Env, b: Record<string, unknown>) {
+  const token = String(b.token || (await setting(env, "update_token")) || "");
+  if (!token) throw new HttpError(400, "ابتدا برنامه را به مخزن GitHub خودتان وصل کنید");
+  const repo = parseRepo(b.repo || (await setting(env, "update_repo")));
+  return { gh: github(token), repo };
+}
+
 const updateInfo: Handler = async ({ env, user, url }) => {
   require(user, "admin");
   const latest = await latestRelease(url.searchParams.has("fresh"));
@@ -494,36 +506,56 @@ const updateInfo: Handler = async ({ env, user, url }) => {
     latest,
     available: !!latest && compareVersions(latest.version, current.version) > 0,
     repo: (await setting(env, "update_repo")) || "",
+    // the token itself never leaves the server
+    connected: !!(await setting(env, "update_token")),
   });
+};
+
+/** Save the install's repository and a token that can write to it, after checking both. */
+const connectUpdate: Handler = async ({ env, request, user }) => {
+  require(user, "admin");
+  const b = await body(request);
+  const repo = parseRepo(b.repo);
+  const token = String(b.token ?? "").trim();
+  const info = await github(token)("GET", `/repos/${repo}`);
+  if (!info.permissions?.push) throw new HttpError(400, "این توکن اجازهٔ نوشتن در مخزن را ندارد؛ «Contents» را روی «Read and write» بگذارید");
+  await putSetting(env, "update_repo", info.full_name);
+  await putSetting(env, "update_token", token);
+  return json({ ok: true, repo: info.full_name });
+};
+
+const disconnectUpdate: Handler = async ({ env, user }) => {
+  require(user, "admin");
+  await env.DB.prepare("DELETE FROM settings WHERE key = 'update_token'").run();
+  return json({ ok: true });
 };
 
 const updateStart: Handler = async ({ env, request, user }) => {
   require(user, "admin");
-  const b = await body(request);
-  const repo = parseRepo(b.repo);
-  const plan = await updatePlan(github(String(b.token ?? "")), repo);
-  await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('update_repo', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(repo).run();
-  return json({ plan, latest: await latestRelease() });
+  const { gh, repo } = await updateTarget(env, await body(request));
+  return json({ plan: await updatePlan(gh, repo), latest: await latestRelease() });
 };
 
-const updateBlobs: Handler = async ({ request, user }) => {
+const updateBlobs: Handler = async ({ env, request, user }) => {
   require(user, "admin");
   const b = await body(request);
   const shas = Array.isArray(b.shas) ? (b.shas as unknown[]).map(String) : [];
   // GitHub calls count towards the Worker's subrequest limit, so the browser sends small batches
   if (shas.length > 12) throw new HttpError(400, "حداکثر ۱۲ فایل در هر مرحله");
-  await copyBlobs(github(String(b.token ?? "")), parseRepo(b.repo), shas);
+  const { gh, repo } = await updateTarget(env, b);
+  await copyBlobs(gh, repo, shas);
   return json({ ok: true });
 };
 
-const updateCommit: Handler = async ({ request, user }) => {
+const updateCommit: Handler = async ({ env, request, user }) => {
   require(user, "admin");
   const b = await body(request);
   const plan = b.plan as { branch: string; base: string; files: { path: string; mode: string; sha: string }[] };
   if (!plan || typeof plan.branch !== "string" || !/^[0-9a-f]{40}$/.test(plan.base) || !Array.isArray(plan.files)) throw new HttpError(400, "برنامهٔ به‌روزرسانی نامعتبر است");
   const files = plan.files.map((f) => ({ path: String(f.path), mode: /^100(644|755)$/.test(String(f.mode)) ? String(f.mode) : "100644", sha: String(f.sha) }));
   if (files.some((f) => !/^[0-9a-f]{40}$/.test(f.sha) || f.path.startsWith("/") || f.path.includes(".."))) throw new HttpError(400, "برنامهٔ به‌روزرسانی نامعتبر است");
-  const commit = await commitUpdate(github(String(b.token ?? "")), parseRepo(b.repo), { branch: plan.branch, base: plan.base, files }, String(b.version ?? "").slice(0, 20));
+  const { gh, repo } = await updateTarget(env, b);
+  const commit = await commitUpdate(gh, repo, { branch: plan.branch, base: plan.base, files }, String(b.version ?? "").slice(0, 20));
   return json({ commit });
 };
 
@@ -1216,6 +1248,8 @@ const routes: [string, RegExp, Handler][] = [
   ["PUT", /^\/api\/suggestions\/(\d+)$/, updateSuggestion],
   ["DELETE", /^\/api\/suggestions\/(\d+)$/, deleteSuggestion],
   ["GET", /^\/api\/update$/, updateInfo],
+  ["PUT", /^\/api\/update\/connection$/, connectUpdate],
+  ["DELETE", /^\/api\/update\/connection$/, disconnectUpdate],
   ["POST", /^\/api\/update\/start$/, updateStart],
   ["POST", /^\/api\/update\/blobs$/, updateBlobs],
   ["POST", /^\/api\/update\/commit$/, updateCommit],

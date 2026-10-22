@@ -2342,9 +2342,14 @@ async function checkUpdate() {
   if (!slot) return;
   slot.className = "demo-banner update-banner";
   slot.innerHTML = `🎉 نسخهٔ تازهٔ شجره‌نامه (${esc(toFa(info.latest.version))}) منتشر شده است؛ نسخهٔ شما ${esc(toFa(info.current.version))} است.
-    <button class="btn small primary" data-act="update">مشاهده و به‌روزرسانی</button>
+    ${info.connected ? `<button class="btn small primary" data-act="update-now">⬆ به‌روزرسانی با یک کلیک</button>` : ""}
+    <button class="btn small ${info.connected ? "" : "primary"}" data-act="update">${info.connected ? "تغییرات" : "مشاهده و به‌روزرسانی"}</button>
     <button class="btn small" data-act="update-later">بعداً</button>`;
   $("[data-act=update]", slot).addEventListener("click", () => openUpdate());
+  $("[data-act=update-now]", slot)?.addEventListener("click", () => {
+    const { el } = modal({ title: "به‌روزرسانی برنامه", body: `<div class="error"></div><div data-progress></div>` });
+    runUpdate(el, info.latest.version);
+  });
   $("[data-act=update-later]", slot).addEventListener("click", () => {
     store.set(`ft_update_later_${info.latest.version}`, "1");
     slot.className = "top-slot";
@@ -2357,6 +2362,16 @@ function openUpdate() {
   fillUpdatePane($("[data-update]", el), { fresh: false });
 }
 
+const TOKEN_GUIDE = `<details class="hint"><summary>توکن را چطور بسازم؟</summary>
+  <ol>
+    <li>در GitHub به <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">Settings ← Developer settings ← Fine-grained tokens ← Generate new token</a> بروید.</li>
+    <li>یک نام بدهید و «Expiration» را روی مدت دلخواه (مثلاً یک سال) بگذارید.</li>
+    <li>در «Repository access» گزینهٔ «Only select repositories» و مخزنِ شجره‌نامهٔ خودتان را انتخاب کنید.</li>
+    <li>در «Permissions ← Repository permissions» بخش «Contents» را روی «Read and write» بگذارید.</li>
+    <li>توکن را بسازید و این‌جا بچسبانید.</li>
+  </ol>
+</details>`;
+
 async function fillUpdatePane(box, { fresh }) {
   let info;
   try {
@@ -2365,64 +2380,83 @@ async function fillUpdatePane(box, { fresh }) {
     box.innerHTML = `<p class="error">${esc(e.message)}</p>`;
     return;
   }
-  const { current, latest, available } = info;
+  const { current, latest, available, connected } = info;
   const changes = latest?.changes?.length ? `<ul>${latest.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : "";
   box.innerHTML = `
     <dl class="facts">
       <dt>نسخهٔ شما</dt><dd>${esc(toFa(current.version))}${current.date ? ` <span class="muted small">(${esc(toFa(current.date))})</span>` : ""}</dd>
       <dt>آخرین نسخه</dt><dd>${latest ? `${esc(toFa(latest.version))}${latest.date ? ` <span class="muted small">(${esc(toFa(latest.date))})</span>` : ""}` : `<span class="muted">GitHub در دسترس نیست</span>`}</dd>
     </dl>
+    ${available ? (changes ? `<div class="section-title">تازه‌های نسخهٔ ${esc(toFa(latest.version))}</div>${changes}` : "") : `<p>✅ برنامهٔ شما به‌روز است.</p>`}
+    <div class="section-title">به‌روزرسانی با یک کلیک</div>
     ${
-      !available
-        ? `<p>✅ برنامهٔ شما به‌روز است.</p>`
-        : `${changes ? `<div class="section-title">تازه‌های نسخهٔ ${esc(toFa(latest.version))}</div>${changes}` : ""}
-    <div class="section-title">به‌روزرسانی خودکار</div>
-    <p class="hint">اگر برنامه را با دکمهٔ «Deploy to Cloudflare» نصب کرده‌اید، یک نسخه از پروژه در GitHub شما ساخته شده و Cloudflare هر تغییرِ آن را خودکار منتشر می‌کند. این‌جا فایل‌های نسخهٔ تازه در همان مخزن ثبت می‌شوند؛ چند دقیقه بعد Cloudflare برنامه و دیتابیس را به‌روز می‌کند. داده‌های شجره‌نامه دست نمی‌خورند.</p>
-    <form data-uf class="row" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
-      <label class="field"><span>مخزن GitHub شما (owner/repo)</span><input class="input" name="repo" dir="ltr" placeholder="your-name/familytree" value="${esc(info.repo)}"></label>
-      <label class="field"><span>توکن GitHub</span><input class="input" name="token" type="password" dir="ltr" autocomplete="off" placeholder="github_pat_…"></label>
-    </form>
-    <details class="hint"><summary>توکن را چطور بسازم؟</summary>
-      <ol>
-        <li>در GitHub به <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">Settings ← Developer settings ← Fine-grained tokens ← Generate new token</a> بروید.</li>
-        <li>در «Repository access» گزینهٔ «Only select repositories» و مخزنِ شجره‌نامهٔ خودتان را انتخاب کنید.</li>
-        <li>در «Permissions ← Repository permissions» بخش «Contents» را روی «Read and write» بگذارید.</li>
-        <li>توکن را بسازید و این‌جا بچسبانید. توکن جایی ذخیره نمی‌شود و فقط برای همین به‌روزرسانی به GitHub فرستاده می‌شود؛ بعد از آن می‌توانید در GitHub پاکش کنید.</li>
-      </ol>
-    </details>
+      connected
+        ? `<p>✅ وصل به مخزن <a href="https://github.com/${esc(info.repo)}" target="_blank" rel="noopener" dir="ltr">${esc(info.repo)}</a>.
+            هر وقت نسخهٔ تازه‌ای بیاید، با دکمهٔ «به‌روزرسانی» در بالای صفحه نصب می‌شود.</p>
+          <div class="actions">
+            ${available ? `<button class="btn primary" data-go>⬆ به‌روزرسانی به نسخهٔ ${esc(toFa(latest.version))}</button>` : ""}
+            <button class="btn" data-disconnect>قطع اتصال</button>
+          </div>`
+        : `<p class="hint">اگر برنامه را با دکمهٔ «Deploy to Cloudflare» نصب کرده‌اید، یک نسخه از پروژه در GitHub شما ساخته شده و Cloudflare هر تغییرِ آن را خودکار منتشر می‌کند.
+            یک بار برنامه را به آن مخزن وصل کنید؛ از آن به بعد هر نسخهٔ تازه با یک کلیک نصب می‌شود: فایل‌های تازه در مخزن شما ثبت می‌شوند و Cloudflare چند دقیقه بعد برنامه و دیتابیس را به‌روز می‌کند. داده‌های شجره‌نامه دست نمی‌خورند.</p>
+          <form data-uf class="row" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+            <label class="field"><span>مخزن GitHub شما (owner/repo)</span><input class="input" name="repo" dir="ltr" placeholder="your-name/familytree" value="${esc(info.repo)}"></label>
+            <label class="field"><span>توکن GitHub</span><input class="input" name="token" type="password" dir="ltr" autocomplete="off" placeholder="github_pat_…"></label>
+          </form>
+          ${TOKEN_GUIDE}
+          <p class="hint">توکن فقط در دیتابیس همین برنامه ذخیره می‌شود و به مرورگر برنمی‌گردد؛ هر وقت بخواهید با «قطع اتصال» یا از خود GitHub پاکش کنید.</p>
+          <div class="actions"><button class="btn primary" data-connect>${available ? `اتصال و به‌روزرسانی به نسخهٔ ${esc(toFa(latest.version))}` : "اتصال"}</button></div>`
+    }
     <p class="hint">اگر خودتان در کد برنامه تغییری داده‌اید، فایل‌هایی که در نسخهٔ تازه عوض شده‌اند جایگزین می‌شوند (تنظیمات wrangler.toml شما حفظ می‌شود).</p>
     <div class="error"></div>
-    <div class="actions"><button class="btn primary" data-go>⬆ به‌روزرسانی به نسخهٔ ${esc(toFa(latest.version))}</button></div>
     <div data-progress></div>
     <div class="section-title">نصب دستی</div>
     <p class="hint">اگر برنامه را خودتان با دستور <code>npm run deploy</code> منتشر کرده‌اید، در پوشهٔ پروژه اجرا کنید:</p>
-    <pre dir="ltr" class="code">git pull\nnpm install\nnpm run deploy</pre>`
-    }
+    <pre dir="ltr" class="code">git pull\nnpm install\nnpm run deploy</pre>
     <p class="hint"><a href="${REPO_URL}" target="_blank" rel="noopener">صفحهٔ پروژه در GitHub</a></p>`;
-  $("[data-go]", box)?.addEventListener("click", (e) => runUpdate(box, latest.version, e.target));
+  const err = $(".error", box);
+  $("[data-go]", box)?.addEventListener("click", () => runUpdate(box, latest.version));
+  $("[data-disconnect]", box)?.addEventListener("click", async () => {
+    if (!confirm("اتصال به GitHub قطع و توکن از سرور پاک شود؟")) return;
+    await apiFetch("DELETE", "/api/update/connection").then(() => fillUpdatePane(box, { fresh: false }), (e) => (err.textContent = e.message));
+  });
+  $("[data-connect]", box)?.addEventListener("click", async (e) => {
+    const form = $("[data-uf]", box);
+    const repo = form.repo.value.trim();
+    const token = form.token.value.trim();
+    err.textContent = "";
+    if (!repo || !token) return (err.textContent = "نام مخزن و توکن را وارد کنید");
+    e.target.disabled = true;
+    try {
+      await apiFetch("PUT", "/api/update/connection", { repo, token });
+      toast("برنامه به مخزن GitHub شما وصل شد");
+      await fillUpdatePane(box, { fresh: false });
+      if (available) runUpdate(box, latest.version);
+    } catch (ex) {
+      err.textContent = ex.message;
+      e.target.disabled = false;
+    }
+  });
 }
 
-async function runUpdate(box, version, btn) {
-  const form = $("[data-uf]", box);
-  const repo = form.repo.value.trim();
-  const token = form.token.value.trim();
+/** Copy the new version into the install's repository; Workers Builds deploys it. */
+async function runUpdate(box, version) {
   const err = $(".error", box);
   const progress = $("[data-progress]", box);
+  const btn = $("[data-go]", box);
   err.textContent = "";
-  if (!repo || !token) return (err.textContent = "نام مخزن و توکن را وارد کنید");
   const say = (html) => (progress.innerHTML = `<div class="result-box">${html}</div>`);
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   try {
     say("در حال مقایسهٔ مخزن شما با نسخهٔ تازه…");
-    const { plan } = await apiFetch("POST", "/api/update/start", { repo, token });
+    const { plan } = await apiFetch("POST", "/api/update/start", {});
     const shas = [...new Set(plan.files.map((f) => f.sha))];
     for (let i = 0; i < shas.length; i += 10) {
       say(`در حال فرستادن فایل‌ها: ${toFa(Math.min(i + 10, shas.length))} از ${toFa(shas.length)}…`);
-      await apiFetch("POST", "/api/update/blobs", { repo, token, shas: shas.slice(i, i + 10) });
+      await apiFetch("POST", "/api/update/blobs", { shas: shas.slice(i, i + 10) });
     }
     say("در حال ثبت تغییرات در مخزن…");
-    const { commit } = await apiFetch("POST", "/api/update/commit", { repo, token, plan, version });
-    form.token.value = "";
+    const { commit } = await apiFetch("POST", "/api/update/commit", { plan, version });
     say(
       commit
         ? `✅ نسخهٔ تازه در <a href="${esc(commit)}" target="_blank" rel="noopener">مخزن شما</a> ثبت شد. Cloudflare حالا برنامه را می‌سازد و منتشر می‌کند (معمولاً ۱ تا ۳ دقیقه). <span data-wait>منتظر انتشار…</span>`
@@ -2432,7 +2466,7 @@ async function runUpdate(box, version, btn) {
   } catch (e) {
     progress.replaceChildren();
     err.textContent = e.message;
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 
