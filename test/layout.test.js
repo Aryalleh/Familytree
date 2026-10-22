@@ -19,7 +19,7 @@ const marriages = [{ id: 1, husband_id: 1, wife_id: 2, status: "married" }];
 const fam = new Family(people, marriages);
 
 test("birth order: eldest on the right; year first, then «فرزند چندم»", () => {
-  const L = layoutTree(fam, fam, { siblingOrder: "birth" });
+  const L = layoutTree(fam, fam, { layout: "tree" });
   const x = (id) => L.pos.get(id).x;
   const order = [4, 6, 3, 5, 8, 7];
   for (let i = 1; i < order.length; i++) assert.ok(x(order[i - 1]) > x(order[i]), JSON.stringify(order.map(x)));
@@ -30,7 +30,7 @@ test("birth order: eldest on the right; year first, then «فرزند چندم»
 });
 
 test("birth order, horizontal layout: eldest on top", () => {
-  const L = layoutTree(fam, fam, { siblingOrder: "birth", orientation: "horizontal" });
+  const L = layoutTree(fam, fam, { layout: "tree", orientation: "horizontal" });
   const y = (id) => L.pos.get(id).y;
   const order = [4, 6, 3, 5, 8, 7];
   for (let i = 1; i < order.length; i++) assert.ok(y(order[i - 1]) < y(order[i]));

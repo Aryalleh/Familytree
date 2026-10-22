@@ -156,7 +156,7 @@ function person(id) {
   return S.fam.get(id);
 }
 const fullName = displayName;
-const DEFAULT_PREFS = { nameGens: 2, orientation: "vertical", hoverTip: true, notesOnTree: false, siblingOrder: "auto" };
+const DEFAULT_PREFS = { nameGens: 2, orientation: "vertical", hoverTip: true, notesOnTree: false, layout: "tree" };
 
 const ORDINAL_FA = ["", "اول", "دوم", "سوم", "چهارم", "پنجم", "ششم", "هفتم", "هشتم", "نهم", "دهم"];
 
@@ -723,7 +723,7 @@ function redraw(relayout = false) {
   const kin = new Set(S.selectedId != null && person(S.selectedId) ? familyIds(S.selectedId).slice(1) : []);
   const pr = prefs();
   const state = { focusId: S.focusId, selectedId: S.selectedId, kin, highlight: S.highlight, highlightUnions: S.highlightUnions, relationsTo, noteLines: pr.notesOnTree ? 1 : 0, guests: S.guests, draftIds: S.draftIds, missingOf: (p) => missingLabel(missingChildren(S.fam, p)) };
-  S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation, gens: S.gens, siblingOrder: pr.siblingOrder });
+  S.tree.render(shownFamily(), S.fam, state, { relayout, orientation: pr.orientation, gens: S.gens, layout: pr.layout });
   renderLegend();
 }
 
@@ -803,7 +803,8 @@ function selectUnion(u) {
   S.highlight.clear();
   S.highlightUnions.clear();
   if (u.consanguinity) highlightLink(u.consanguinity);
-  S.highlight.add(u.h).add(u.w);
+  // a spouse drawn a second time next to their partner has a negated id in the layout
+  S.highlight.add(Math.abs(u.h)).add(Math.abs(u.w));
   S.highlightUnions.add(u.key);
   redraw();
   renderPanel();
@@ -829,7 +830,7 @@ function highlightLink(link) {
   for (let i = 0; i + 1 < path.length; i++) {
     const [a, b] = [path[i], path[i + 1]];
     for (const u of unions) {
-      const parents = [u.h, u.w, u.single];
+      const parents = [u.h, u.w, u.single].map((x) => (x == null ? x : Math.abs(x)));
       if ((u.children.includes(a) && parents.includes(b)) || (u.children.includes(b) && parents.includes(a))) S.highlightUnions.add(u.key);
     }
   }
@@ -2677,9 +2678,9 @@ function openSettings() {
         <label class="check"><input type="radio" name="orientation" value="horizontal" ${pr.orientation === "horizontal" ? "checked" : ""}> افقی: نسل‌ها از راست به چپ، فرزندان زیر هم (برای خانواده‌های پرجمعیت، کم‌عرض‌تر)</label>
       </div>
       <label class="check"><input type="checkbox" name="hoverTip" ${pr.hoverTip ? "checked" : ""}> نمایش اطلاعات و یادداشت با نگه داشتن موس روی هر نفر</label>
-      <div class="field"><span>چیدمان خواهر و برادرها</span>
-        <label class="check"><input type="radio" name="siblingOrder" value="auto" ${pr.siblingOrder !== "birth" ? "checked" : ""}> خودکار (کمترین خط‌های متقاطع)</label>
-        <label class="check"><input type="radio" name="siblingOrder" value="birth" ${pr.siblingOrder === "birth" ? "checked" : ""}> به ترتیب تولد (بزرگ‌تر سمت راست، یا بالا در چیدمان افقی)</label>
+      <div class="field"><span>شکل شاخه‌ها</span>
+        <label class="check"><input type="radio" name="layout" value="tree" ${pr.layout !== "compact" ? "checked" : ""}> درختی: هر پدر و مادر وسطِ فرزندانشان، شاخه‌ها جدا از هم، خواهر و برادرها به ترتیب تولد (بزرگ‌تر سمت راست، یا بالا در چیدمان افقی)</label>
+        <label class="check"><input type="radio" name="layout" value="compact" ${pr.layout === "compact" ? "checked" : ""}> فشرده: کم‌عرض‌تر، با کمترین خط‌های متقاطع</label>
       </div>
       <label class="check"><input type="checkbox" name="notesOnTree" ${pr.notesOnTree ? "checked" : ""}> نمایش یادداشت روی کارت‌های شجره‌نامه (برای چاپ، شیوهٔ نمایش یادداشت در پنجرهٔ چاپ انتخاب می‌شود)</label>
       <p class="hint">این تنظیمات برای حساب شما ذخیره می‌شود و روی همهٔ دستگاه‌هایتان اعمال می‌شود.</p>
@@ -2702,7 +2703,7 @@ function openSettings() {
         orientation: form.orientation.value,
         hoverTip: form.hoverTip.checked,
         notesOnTree: form.notesOnTree.checked,
-        siblingOrder: form.siblingOrder.value,
+        layout: form.layout.value,
       });
       close();
       updateModeLabel();
@@ -2730,9 +2731,9 @@ let printPrep = null;
 function buildPrint(opts) {
   const orientation = opts.orientation || prefs().orientation;
   const notes = opts.notes || "list";
-  const siblingOrder = prefs().siblingOrder;
-  if (!printPrep || printPrep.fam !== S.viewFam || printPrep.orientation !== orientation || printPrep.notesMode !== notes || printPrep.siblingOrder !== siblingOrder) {
-    printPrep = { ...prepare(S.viewFam, { orientation, notes, gens: S.gens, siblingOrder }), fam: S.viewFam, notesMode: notes };
+  const layout = prefs().layout;
+  if (!printPrep || printPrep.fam !== S.viewFam || printPrep.orientation !== orientation || printPrep.notesMode !== notes || printPrep.layout !== layout) {
+    printPrep = { ...prepare(S.viewFam, { orientation, notes, gens: S.gens, layout }), fam: S.viewFam, notesMode: notes };
   }
   const plan = planPages(printPrep, { ...opts, to: Math.min(opts.to, printPrep.generations) });
   renderPages($("#print-root"), plan, printPrep, { title: "شجره‌نامه خاندان", legendHtml: PRINT_LEGEND });

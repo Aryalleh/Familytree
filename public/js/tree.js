@@ -3,6 +3,8 @@ import dagre from "../vendor/dagre.esm.js";
 
 export const CARD_W = 172;
 export const CARD_H = 62;
+/** Cards across (centre to centre) beyond which a spouse's family link counts as far. */
+const FAR_SPAN = 3;
 /** Card height with room for `lines` lines of notes. */
 export const cardHeight = (lines = 0) => (lines > 0 ? 66 + lines * 15 : CARD_H);
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -86,7 +88,7 @@ function orderBlock(members, adj) {
  * @param {import('./kinship.js').Family} fam  people to draw
  * @param {import('./kinship.js').Family} full the whole family (for consanguinity)
  */
-export function buildModel(fam, full = fam, { duplicates = false, gens = null } = {}) {
+export function buildModel(fam, full = fam, { duplicates = false, gens = null, split = null } = {}) {
   const has = (id) => id != null && fam.people.has(id);
 
   const couples = new Map();
@@ -156,6 +158,26 @@ export function buildModel(fam, full = fam, { duplicates = false, gens = null } 
     }
   }
 
+  // split (screen): someone who married far from their own branch stays under their parents, and
+  // a copy (negated id, same marker number on both) stands next to their spouse instead
+  if (split?.size && !duplicates) {
+    for (const id of split) {
+      const b = blockOf.get(id);
+      if (!b || b.members.length < 2 || markers.has(id)) continue;
+      b.members = b.members.map((m) => (m === id ? -id : m));
+      blockOf.set(-id, b);
+      const home = { key: `b${blocks.length}`, members: [id] };
+      blocks.push(home);
+      blockOf.set(id, home);
+      for (const u of unions) {
+        if (u.h === id) u.h = -id;
+        if (u.w === id) u.w = -id;
+        if (u.single === id) u.single = -id;
+      }
+      markers.set(id, markers.size + 1);
+    }
+  }
+
   // block graph: parent block(s) → child blocks
   const childBlocks = new Map(blocks.map((b) => [b, []]));
   const parentBlocks = new Map(blocks.map((b) => [b, []]));
@@ -184,11 +206,12 @@ export function buildModel(fam, full = fam, { duplicates = false, gens = null } 
  * Works in an abstract frame — u: across a generation, v: down the generations — and maps it
  * to the screen: vertical → (u, v); horizontal → (−v, u), i.e. generations run right-to-left
  * and children are stacked under each other, which keeps wide families narrow.
- * siblingOrder "birth" lays the blocks out as a tree with siblings in birth order (see
- * birthLayout) instead of letting dagre order them to minimise crossings.
- * @param {{keys?:Set<string>|null, orientation?:'vertical'|'horizontal', cardH?:number, siblingOrder?:'auto'|'birth'}} opts
+ * layout "tree" (default) lays the blocks out as a tree, each family centred over its children
+ * and siblings in birth order (see birthLayout); "compact" lets dagre pack them to minimise
+ * crossings.
+ * @param {{keys?:Set<string>|null, orientation?:'vertical'|'horizontal', cardH?:number, layout?:'tree'|'compact'}} opts
  */
-export function positionModel(model, { keys = null, orientation = "vertical", cardH = CARD_H, siblingOrder = "auto" } = {}) {
+export function positionModel(model, { keys = null, orientation = "vertical", cardH = CARD_H, layout = "tree" } = {}) {
   const vertical = orientation !== "horizontal";
   const cw = CARD_W;
   const ch = cardH;
@@ -205,12 +228,13 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
 
   const unions = model.unions.filter((u) => inSet.has(blockOf.get(u.h ?? u.single)));
   const NODE_SEP = vertical ? 34 : 18;
+  const BRANCH_SEP = vertical ? 90 : 40;
   // block centres (abstract frame) and, for dagre, the routed points of long edges
   const node = new Map();
   let edgePoints = () => null;
   let primary = null; // birth layout: "src>dst" links that shape the tree; the others are drawn as curves
-  if (siblingOrder === "birth") {
-    primary = birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SEP, eldestFirst: !vertical }, node);
+  if (layout !== "compact") {
+    primary = birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SEP, BRANCH_SEP, eldestFirst: !vertical }, node);
   } else {
     const g = new dagre.graphlib.Graph({ multigraph: true });
     g.setGraph({ rankdir: "TB", nodesep: NODE_SEP, ranksep: RANK_SEP, marginx: 0, marginy: 0 });
@@ -380,7 +404,8 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
         }
         cmds.push(["L", [p.u, top]]);
       }
-      links.push({ d: pathOf(cmds), union: u, child: c, long });
+      const cross = primary ? !primary.has(`${src.key}>${dst.key}`) : mainParent.has(dst) && mainParent.get(dst) !== src;
+      links.push({ d: pathOf(cmds), union: u, child: c, long, cross, span: Math.abs(u.du - p.u) / (cC + GAP) });
     }
   }
 
@@ -469,7 +494,7 @@ export function sortSiblings(fam, items, idOf = (x) => x) {
  * a block's other parent family is linked with a curve. Rows are the longest path from the
  * top, as with dagre. Fills `node` with block centres; returns the "src>dst" tree links.
  */
-function birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SEP, eldestFirst }, node) {
+function birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SEP, BRANCH_SEP, eldestFirst }, node) {
   const { blockOf, fam } = model;
   const parents = new Map(blocks.map((b) => [b, []]));
   for (const u of unions) {
@@ -509,11 +534,14 @@ function birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SE
     list.splice(0, list.length, ...sorted);
     return list;
   };
+  // siblings with families of their own are set further apart, so sub-branches stay distinct
+  const gapAfter = (a, b) => (kids.get(a.b).length || kids.get(b.b).length ? BRANCH_SEP : NODE_SEP);
+  const innerOf = (ks) => ks.reduce((s, k, i) => s + widthOf(k.b) + (i ? gapAfter(ks[i - 1], k) : 0), 0);
   const width = new Map();
   const widthOf = (b) => {
     if (width.has(b)) return width.get(b);
     const ks = sortKids(kids.get(b));
-    const inner = ks.reduce((s, k) => s + widthOf(k.b), 0) + NODE_SEP * Math.max(0, ks.length - 1);
+    const inner = innerOf(ks);
     const w = Math.max(size(b), inner);
     width.set(b, w);
     return w;
@@ -523,13 +551,14 @@ function birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SE
   const place = (b, left) => {
     const w = widthOf(b);
     const ks = lay(kids.get(b));
-    const inner = ks.reduce((s, k) => s + widthOf(k.b), 0) + NODE_SEP * Math.max(0, ks.length - 1);
+    const inner = innerOf(ks);
     let x = left + (w - inner) / 2;
     const centres = [];
-    for (const k of ks) {
+    ks.forEach((k, i) => {
+      if (i) x += gapAfter(ks[i - 1], k);
       centres.push(place(k.b, x));
-      x += widthOf(k.b) + NODE_SEP;
-    }
+      x += widthOf(k.b);
+    });
     let c = centres.length ? (centres[0] + centres[centres.length - 1]) / 2 : left + w / 2;
     c = Math.min(Math.max(c, left + size(b) / 2), left + w - size(b) / 2);
     node.set(b.key, { x: c, y: rank.get(b) * (cM + RANK_SEP) + cM / 2 });
@@ -538,7 +567,7 @@ function birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SE
   let x = 0;
   for (const r of lay(sortKids(roots))) {
     place(r.b, x);
-    x += widthOf(r.b) + NODE_SEP * 3;
+    x += widthOf(r.b) + BRANCH_SEP * 2;
   }
   return tree;
 }
@@ -669,7 +698,7 @@ export function drawLayout(root, L, state = {}, on = {}) {
   }
 
   const entries = [...fam.people.values()].filter((p) => pos.has(p.id)).map((p) => ({ p, key: p.id, copy: false }));
-  for (const b of L.blocks) if (b.copy) entries.push({ p: fam.get(-b.members[0]), key: b.members[0], copy: true });
+  for (const b of L.blocks) for (const m of b.members) if (m < 0 && pos.has(m)) entries.push({ p: fam.get(-m), key: m, copy: true });
   for (const { p, key, copy } of entries) {
     const { x, y } = pos.get(key);
     const rels = state.relationsTo ? state.relationsTo(p.id) : [];
@@ -761,6 +790,21 @@ export function drawLayout(root, L, state = {}, on = {}) {
       tip.textContent = `${miss} هنوز ثبت نشده`;
     }
     const marker = L.markers.get(p.id);
+    if (marker && copy) {
+      // which person this second card is: next to the spouse → whose child; alone (print) → whose spouse
+      const withSpouse = L.model.blockOf.get(key)?.members.length > 1;
+      const father = fam.get(p.father_id) || fam.get(p.mother_id);
+      const spouse = fam.spousesOf(p.id).map((s) => fam.get(s.id)).find(Boolean);
+      const label = withSpouse ? `↩ همان ${p.first_name || "بی‌نام"}${father ? ` فرزند ${father.first_name || "بی‌نام"}` : ""}` : spouse ? `↪ همسرِ ${displayName(spouse)}` : "";
+      if (label) {
+        const below = L.orientation === "vertical";
+        const tg = el("g", { class: "dup-caption", transform: `translate(${cw / 2},${below ? ch + 13 : ch})` }, g);
+        const t = text(tg, `${label} (${toFa(marker)})`, { "text-anchor": "middle", dy: "0.32em", direction: "rtl" });
+        fitText(t, cw - 8);
+        const w = Math.min(cw - 4, (t.getComputedTextLength?.() || label.length * 6) + 14);
+        tg.insertBefore(el("rect", { x: -w / 2, y: -8, width: w, height: 16, rx: 8 }), t);
+      }
+    }
     if (marker) {
       // same number on both copies of a person drawn twice (print view)
       const mg = el("g", { class: "dup-marker", transform: "translate(4,4)" }, g);
@@ -806,9 +850,19 @@ export class TreeView {
    * @param {import('./kinship.js').Family} fam   people to draw
    * @param {import('./kinship.js').Family} full  whole family
    */
-  render(fam, full, state, { relayout = true, orientation = "vertical", gens = null, siblingOrder = "auto" } = {}) {
+  render(fam, full, state, { relayout = true, orientation = "vertical", gens = null, layout = "tree" } = {}) {
     if (relayout || !this.layout) {
-      this.layout = layoutTree(fam, full, { orientation, cardH: cardHeight(state.noteLines), gens, siblingOrder });
+      const opts = { orientation, cardH: cardHeight(state.noteLines), gens, layout };
+      let L = layoutTree(fam, full, opts);
+      // someone joined to a spouse far across the tree: draw them a second time next to the spouse
+      const split = new Set();
+      for (let pass = 0; pass < 2; pass++) {
+        const far = L.links.filter((l) => l.cross && l.span > FAR_SPAN && l.child > 0 && !split.has(l.child));
+        if (!far.length) break;
+        for (const l of far) split.add(l.child);
+        L = layoutTree(fam, full, { ...opts, split });
+      }
+      this.layout = L;
     }
     drawLayout(this.viewport, this.layout, { ...state, defs: this.defs }, {
       person: (id) => this.opts.onSelectPerson(id),
@@ -872,7 +926,13 @@ export class TreeView {
   /** Box around the given people (cards plus badges above them). */
   boxOf(ids) {
     const L = this.layout;
-    const pts = ids.map((id) => L?.pos.get(id)).filter(Boolean);
+    if (!L) return null;
+    // someone drawn twice (see buildModel's split): use the card nearer the others in the list
+    const one = ids.filter((id) => !L.pos.has(-id)).map((id) => L.pos.get(id)).filter(Boolean);
+    const cx = one.length ? one.reduce((s, p) => s + p.x, 0) / one.length : null;
+    const cy = one.length ? one.reduce((s, p) => s + p.y, 0) / one.length : null;
+    const near = (a, b) => (cx == null || !b ? a : !a ? b : Math.hypot(a.x - cx, a.y - cy) <= Math.hypot(b.x - cx, b.y - cy) ? a : b);
+    const pts = ids.map((id) => (L.pos.has(-id) ? near(L.pos.get(id), L.pos.get(-id)) : L.pos.get(id))).filter(Boolean);
     if (!pts.length) return null;
     const x0 = Math.min(...pts.map((p) => p.x)) - L.cw / 2;
     const x1 = Math.max(...pts.map((p) => p.x)) + L.cw / 2;

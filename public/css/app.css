@@ -1842,3 +1842,14 @@ label.btn.disabled {
 .ops .op-fields s {
   color: var(--muted);
 }
+
+/* second card of someone who married far from their branch */
+.dup-caption rect {
+  fill: var(--surface);
+  stroke: var(--k-self);
+}
+.dup-caption text {
+  fill: var(--k-self);
+  font-size: 10.5px;
+  font-weight: 700;
+}
