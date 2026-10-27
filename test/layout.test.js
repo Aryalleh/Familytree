@@ -35,3 +35,30 @@ test("birth order, horizontal layout: eldest on top", () => {
   const order = [4, 6, 3, 5, 8, 7];
   for (let i = 1; i < order.length; i++) assert.ok(y(order[i - 1]) < y(order[i]));
 });
+
+// cousins from two sub-branches marry: 10 → 11 → 13 (husband) and 10 → 12 → 14 → 15 (wife),
+// so the wife's family is a generation deeper; their child is 16
+const cousins = new Family(
+  [
+    P(10, "male"),
+    P(11, "male", { father_id: 10 }),
+    P(12, "male", { father_id: 10 }),
+    P(13, "male", { father_id: 11 }),
+    P(14, "male", { father_id: 12 }),
+    P(15, "female", { father_id: 14 }),
+    P(16, "male", { father_id: 13, mother_id: 15 }),
+  ],
+  [{ id: 1, husband_id: 13, wife_id: 15, status: "married" }],
+);
+
+for (const layout of ["tree", "compact"]) {
+  test(`${layout} layout: a couple from two sub-branches continues under the husband's family`, () => {
+    const L = layoutTree(cousins, cousins, { layout });
+    const link = (child) => L.links.find((l) => Math.abs(l.child) === child);
+    assert.equal(link(13).cross, false, "husband's family: the main line");
+    assert.equal(link(15).cross, true, "wife's family: the side link");
+    // the couple sits within the husband's father's branch, not the wife's father's
+    const x = (id) => L.pos.get(id).x;
+    assert.ok(Math.abs(x(13) - x(11)) < Math.abs(x(13) - x(14)), JSON.stringify([x(11), x(13), x(14)]));
+  });
+}

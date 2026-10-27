@@ -321,8 +321,8 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
   }
 
   // A block with two parent families (both spouses' parents are in the tree): with dagre, the
-  // nearer family gets the usual bus; the other is joined with a curve, so its line doesn't run
-  // along another family's sibling bus and look like the couple are siblings.
+  // husband's family (else the nearer one) gets the usual bus; the other is joined with a curve,
+  // so its line doesn't run along another family's sibling bus and look like the couple are siblings.
   const mainParent = new Map();
   if (!primary) {
     const best = new Map();
@@ -331,7 +331,8 @@ export function positionModel(model, { keys = null, orientation = "vertical", ca
       for (const c of u.children) {
         const dst = blockOf.get(c);
         if (!inSet.has(dst) || dst === src || !inSet.has(src)) continue;
-        const d = Math.abs(u.du - ap.get(c).u);
+        // the husband's side wins: count it as nearest
+        const d = model.fam.get(Math.abs(c))?.gender === "male" ? -1 : Math.abs(u.du - ap.get(c).u);
         const cur = best.get(dst);
         if (!cur) best.set(dst, { src, d, n: 1 });
         else best.set(dst, cur.src === src ? cur : { ...(d < cur.d ? { src, d } : cur), n: cur.n + 1 });
@@ -524,8 +525,10 @@ function birthLayout(model, blocks, inSet, unions, { size, cM, RANK_SEP, NODE_SE
       roots.push({ b, child: b.members[0] });
       continue;
     }
-    // nearest parent family; on a tie, the one the child's father belongs to
-    const best = [...ps].sort((x, y) => rank.get(y.src) - rank.get(x.src) || (y.father != null) - (x.father != null))[0];
+    // a couple whose both sides are in the tree continues under the husband's family (the line
+    // goes on through the father); otherwise the nearest parent family, then the father's
+    const male = (p) => (fam.get(Math.abs(p.child))?.gender === "male" ? 1 : 0);
+    const best = [...ps].sort((x, y) => male(y) - male(x) || rank.get(y.src) - rank.get(x.src) || (y.father != null) - (x.father != null))[0];
     kids.get(best.src).push({ b, child: best.child });
     tree.add(`${best.src.key}>${b.key}`);
   }

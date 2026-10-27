@@ -1,6 +1,6 @@
 // Service worker: keeps the app shell available offline. Family data is not cached here —
 // the app keeps its own snapshot and queue of offline edits (see js/offline.js).
-const VERSION = "ft-v9";
+const VERSION = "ft-v10";
 const SHELL = [
   "/",
   "/css/app.css",
