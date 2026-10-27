@@ -911,6 +911,7 @@ function renderPanel() {
     <div class="psec"><h4>فرزندان ${children.length ? `<span class="muted">(${toFa(children.length)} نفر)</span>` : ""}</h4>
       ${childRows(children)}
       ${missingBox(p, editor)}
+      ${otherParentBox(p, spouses, editor)}
       ${editor ? `<div class="add-pair"><button class="add-row" data-add="son">＋ پسر</button><button class="add-row" data-add="daughter">＋ دختر</button></div>` : !children.length ? `<div class="muted">ثبت نشده</div>` : ""}
     </div>
     ${upward && (p.father_id || p.mother_id) ? `<div class="add-pair"><button class="add-row" data-add="brother">＋ برادر</button><button class="add-row" data-add="sister">＋ خواهر</button></div>` : ""}
@@ -1037,9 +1038,45 @@ function renderPanel() {
   $("[data-act=open-clan]", panel)?.addEventListener("click", () => setClan(p.clan_id));
   $("[data-act=move]", panel)?.addEventListener("click", () => openMoveClan(p));
   $$("[data-add]", panel).forEach((b) => b.addEventListener("click", () => addRelative(p, b.dataset.add)));
+  $("[data-fill-parent]", panel)?.addEventListener("click", (e) => fillOtherParent(p, Number(e.target.dataset.fillParent), e.target));
   $$("[data-unnamed]", panel).forEach((b) => b.addEventListener("click", () => addUnnamedChild(p, b.dataset.unnamed, b)));
   $("[data-act=name]", panel)?.addEventListener("click", () => openNameForm(p));
   $("[data-act=report]", panel)?.addEventListener("click", () => openSuggestions({ personId: p.id }));
+}
+
+/** Children of p whose other parent is empty: with one spouse, offer to fill it in for all of them. */
+function orphanedChildren(p) {
+  const other = p.gender === "male" ? "mother_id" : "father_id";
+  const own = p.gender === "male" ? "father_id" : "mother_id";
+  return S.people.filter((c) => c[own] === p.id && c[other] == null);
+}
+
+function otherParentBox(p, spouses, editor) {
+  const kids = orphanedChildren(p);
+  if (!kids.length) return "";
+  const word = p.gender === "male" ? "مادرِ" : "پدرِ";
+  const s = spouses.length === 1 ? person(spouses[0].id) : null;
+  return `<div class="missing-box">
+    <div>⚠ ${word} ${toFa(kids.length)} فرزند ثبت نشده است${s ? `؛ اگر ${esc(fullName(s))} است، با یک کلیک ثبت کنید` : ""}.</div>
+    ${s && editor ? `<div class="add-pair"><button class="btn small" data-fill-parent="${s.id}">ثبت ${esc(fullName(s))} به‌عنوان ${word.slice(0, -1)} ${kids.length > 1 ? `هر ${toFa(kids.length)} فرزند` : "این فرزند"}</button></div>` : ""}
+  </div>`;
+}
+
+async function fillOtherParent(p, spouseId, btn) {
+  const field = p.gender === "male" ? "mother_id" : "father_id";
+  const kids = orphanedChildren(p);
+  btn.disabled = true;
+  let done = 0;
+  try {
+    for (const c of kids) {
+      if (!(await saveWithConflicts("PUT", `/api/people/${c.id}`, { [field]: spouseId, base_version: c.version }))) break;
+      done++;
+    }
+    toast(`برای ${toFa(done)} فرزند ثبت شد`);
+  } catch (e) {
+    toast(e.message, true);
+  }
+  await loadTree();
 }
 
 /** "⚠ ۱ پسر و ۲ دختر هنوز ثبت نشده" under the children, with buttons to add them without a name. */

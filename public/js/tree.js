@@ -95,10 +95,23 @@ export function buildModel(fam, full = fam, { duplicates = false, gens = null, s
   for (const m of fam.marriages) {
     couples.set(`${m.husband_id}|${m.wife_id}`, { key: `m${m.id}`, h: m.husband_id, w: m.wife_id, marriage: m, children: [] });
   }
+  // a parent with exactly one spouse: children whose other parent was left empty are drawn
+  // from the couple (the panel offers to fill in the missing parent)
+  const marriagesOf = new Map();
+  for (const m of fam.marriages) {
+    if (!has(m.husband_id) || !has(m.wife_id)) continue;
+    for (const id of [m.husband_id, m.wife_id]) marriagesOf.set(id, [...(marriagesOf.get(id) || []), m]);
+  }
+  const onlySpouse = (id, male) => {
+    const ms = marriagesOf.get(id);
+    return ms?.length === 1 ? (male ? ms[0].wife_id : ms[0].husband_id) : null;
+  };
   const singles = new Map();
   for (const p of fam.people.values()) {
-    const f = has(p.father_id) ? p.father_id : null;
-    const mo = has(p.mother_id) ? p.mother_id : null;
+    let f = has(p.father_id) ? p.father_id : null;
+    let mo = has(p.mother_id) ? p.mother_id : null;
+    if (f && !mo && p.mother_id == null) mo = onlySpouse(f, true);
+    else if (mo && !f && p.father_id == null) f = onlySpouse(mo, false);
     if (f && mo) {
       const k = `${f}|${mo}`;
       if (!couples.has(k)) couples.set(k, { key: `u${f}_${mo}`, h: f, w: mo, marriage: null, children: [] });

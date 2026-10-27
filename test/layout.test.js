@@ -62,3 +62,14 @@ for (const layout of ["tree", "compact"]) {
     assert.ok(Math.abs(x(13) - x(11)) < Math.abs(x(13) - x(14)), JSON.stringify([x(11), x(13), x(14)]));
   });
 }
+
+test("children with only the father recorded hang from his only marriage", () => {
+  const f = new Family(
+    [P(20, "male"), P(21, "female"), P(22, "male", { father_id: 20 }), P(23, "female", { father_id: 20 })],
+    [{ id: 1, husband_id: 20, wife_id: 21, status: "married" }],
+  );
+  const L = layoutTree(f, f, { layout: "tree" });
+  const u = L.unions.find((x) => x.marriage?.id === 1);
+  assert.deepEqual([...u.children].sort(), [22, 23]);
+  assert.ok(!L.unions.some((x) => x.single === 20), "no separate single-parent union");
+});
