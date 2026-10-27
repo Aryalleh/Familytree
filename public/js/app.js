@@ -1284,11 +1284,115 @@ function personOptions(filter, selected, { none = "— هیچ —" } = {}) {
     list
       .map((p) => {
         const span = lifeSpan(p);
-        return `<option value="${p.id}" ${p.id === selected ? "selected" : ""}>${esc(lineageName(p))}${span ? ` (${esc(span)})` : ""}</option>`;
+        // data-k: what the search box matches (more generations of fathers, nickname, id)
+        const k = normalize(`${lineageName(p, 4)} ${p.nickname || ""} ${p.id}`);
+        return `<option value="${p.id}" data-p data-k="${esc(k)}" ${p.id === selected ? "selected" : ""}>${esc(lineageName(p))}${span ? ` (${esc(span)})` : ""}</option>`;
       })
       .join("")
   );
 }
+
+/**
+ * A person <select> becomes a search box with a filtered list. The select stays (hidden) in the
+ * form, so FormData and "change" listeners work as before. Every word typed must appear in the
+ * person's name with their fathers' names, e.g. «علی حسن» finds «علی فرزند حسن».
+ */
+function personCombo(select) {
+  if (select.dataset.combo) return;
+  select.dataset.combo = "1";
+  const wrap = document.createElement("div");
+  wrap.className = "combo";
+  const input = document.createElement("input");
+  Object.assign(input, { className: select.className, type: "text", autocomplete: "off", spellcheck: false });
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-expanded", "false");
+  const list = document.createElement("div");
+  list.className = "combo-list";
+  list.setAttribute("role", "listbox");
+  list.hidden = true;
+  wrap.append(input, list);
+  select.after(wrap);
+  select.hidden = true;
+
+  let matches = [];
+  let active = 0;
+  const refresh = () => {
+    const o = select.selectedOptions[0];
+    const none = [...select.options].find((x) => !x.value);
+    input.value = o && o.value ? o.textContent : "";
+    input.placeholder = none?.textContent?.trim() || "جست‌وجوی نام…";
+  };
+  const close = () => {
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+  };
+  const paint = () => {
+    list.innerHTML = matches.length
+      ? matches.map((o, i) => `<div class="combo-item ${i === active ? "active" : ""} ${o.value ? "" : "none"}" role="option" data-i="${i}">${esc(o.textContent)}</div>`).join("")
+      : `<div class="combo-empty">کسی با این نام پیدا نشد</div>`;
+    list.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+  };
+  const show = (q) => {
+    const words = normalize(q).split(/\s+/).filter(Boolean);
+    const all = [...select.options];
+    matches = words.length ? all.filter((o) => o.value && words.every((w) => (o.dataset.k || normalize(o.textContent)).includes(w))).slice(0, 80) : all.slice(0, 80);
+    active = Math.max(0, words.length ? 0 : matches.indexOf(select.selectedOptions[0]));
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    paint();
+  };
+  const choose = (o) => {
+    if (!o) return;
+    select.value = o.value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    refresh();
+    close();
+  };
+  input.addEventListener("focus", () => {
+    input.select();
+    show("");
+  });
+  input.addEventListener("input", () => show(input.value));
+  input.addEventListener("blur", () => setTimeout(() => (close(), refresh()), 150));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (list.hidden) return show(input.value);
+      active = Math.min(matches.length - 1, Math.max(0, active + (e.key === "ArrowDown" ? 1 : -1)));
+      paint();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (!list.hidden) choose(matches[active]);
+    } else if (e.key === "Escape" && !list.hidden) {
+      e.stopPropagation(); // close the list, not the dialog
+      close();
+      refresh();
+    }
+  });
+  // mousedown, not click: the input keeps focus and the surrounding <label> doesn't react
+  list.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const item = e.target.closest("[data-i]");
+    if (item) choose(matches[Number(item.dataset.i)]);
+  });
+  select.addEventListener("change", refresh);
+  select._comboRefresh = refresh;
+  refresh();
+}
+
+// person selects anywhere (dialogs, the side panel, access rows added later) get the search box;
+// when a select's options are replaced, its box shows the new selection
+new MutationObserver((muts) => {
+  for (const m of muts) {
+    if (m.target instanceof HTMLSelectElement) m.target._comboRefresh?.();
+    for (const n of m.addedNodes) {
+      if (!(n instanceof Element)) continue;
+      const sels = n instanceof HTMLSelectElement ? [n] : n.querySelectorAll("select");
+      for (const sel of sels) if (sel.querySelector("option[data-p]")) personCombo(sel);
+      if (m.target instanceof HTMLSelectElement && m.target.querySelector("option[data-p]")) personCombo(m.target);
+    }
+  }
+}).observe(document.body, { childList: true, subtree: true });
 
 /** Clan picker for the person form: clans the user may add to, plus the current one. */
 function clanField(p, existing) {
